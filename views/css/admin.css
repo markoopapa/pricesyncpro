@@ -13,3 +13,89 @@
     padding: 2px 6px;
     border-radius: 4px;
 }
+
+/* Dashboard Tabs */
+#pricesync-dashboard .nav-tabs {
+    margin-bottom: 20px;
+    border-bottom: 2px solid #ddd;
+}
+#pricesync-dashboard .nav-tabs > li.active > a {
+    border: 2px solid #ddd;
+    border-bottom-color: white;
+    font-weight: bold;
+    color: #2eacce;
+}
+
+/* Status Cards */
+.status-card {
+    background: #fff;
+    border: 1px solid #eee;
+    padding: 15px;
+    margin-bottom: 10px;
+    border-radius: 5px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+}
+.status-info strong { display: block; font-size: 14px; }
+.status-sub { font-size: 11px; color: #999; }
+.badge-success { background: #28a745; color: white; padding: 5px 10px; font-size: 11px; }
+.badge-default { background: #ccc; color: #666; padding: 5px 10px; font-size: 11px; }
+
+/* Console Style (Sötét doboz) */
+.console-wrapper {
+    background: #1e1e1e;
+    border-radius: 8px;
+    box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+    overflow: hidden;
+    color: #eee;
+    font-family: 'Courier New', monospace;
+    min-height: 300px;
+}
+.console-header {
+    background: #2d2d2d;
+    padding: 10px;
+    border-bottom: 1px solid #444;
+}
+.console-title {
+    margin-left: 10px;
+    font-size: 12px;
+    color: #888;
+    text-transform: uppercase;
+}
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; }
+.dot.red { background: #ff5f56; }
+.dot.yellow { background: #ffbd2e; }
+.dot.green { background: #27c93f; }
+
+.console-body {
+    padding: 15px;
+    font-size: 12px;
+    line-height: 1.6;
+}
+.log-line { margin-bottom: 5px; }
+.log-line .time { color: #666; margin-right: 10px; }
+.log-line .cmd { color: #fff; }
+.log-line .res.success { color: #27c93f; font-weight: bold; }
+.log-line.warning { color: #ffbd2e; }
+
+/* Table Style (Fekete fejléc) */
+.table-black-header thead th {
+    background: #222;
+    color: #fff;
+    border: none;
+}
+.table-black-header tbody tr td {
+    vertical-align: middle;
+    border-color: #eee;
+}
+
+/* Panel tweaks */
+.panel-info { border-color: #bce8f1; }
+.panel-info > .panel-heading {
+    background-color: #d9edf7;
+    color: #31708f;
+    border-color: #bce8f1;
+    font-weight: bold;
+}
