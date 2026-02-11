@@ -76,121 +76,66 @@ class PriceSyncPro extends Module
     }
 
     /**
-     * Konfigurációs oldal (Admin)
+     * ÚJ GETCONTENT - Template betöltése
      */
     public function getContent(): string
     {
         $output = '';
 
-        // 1. Blacklist Műveletek (Hozzáadás / Törlés)
-        if (Tools::isSubmit('submitAddBlacklist')) {
-            $ref = trim(Tools::getValue('blacklist_reference'));
-            if (!empty($ref)) {
-                if ($this->addToBlacklist($ref)) {
-                    $output .= $this->displayConfirmation("Termék ($ref) hozzáadva a tiltólistához.");
-                } else {
-                    $output .= $this->displayError("Hiba: Ez a cikkszám már listázva van, vagy adatbázis hiba történt.");
-                }
-            }
-        } elseif (Tools::isSubmit('deleteblacklist')) {
-            $id = (int)Tools::getValue('id_blacklist');
-            Db::getInstance()->delete($this->tableName, 'id_blacklist = ' . $id);
-            $output .= $this->displayConfirmation("Sikeres törlés.");
-        }
-
-        // 2. Beállítások mentése
-        if (Tools::isSubmit('submitPriceSyncSettings')) {
+        // Mentések kezelése
+        if (Tools::isSubmit('submitPriceSyncConfig')) {
             Configuration::updateValue('PSP_MODE', Tools::getValue('PSP_MODE'));
             Configuration::updateValue('PSP_TOKEN', Tools::getValue('PSP_TOKEN'));
-            Configuration::updateValue('PSP_TARGETS', Tools::getValue('PSP_TARGETS'));
-            Configuration::updateValue('PSP_MATCH_BY', Tools::getValue('PSP_MATCH_BY'));
-            Configuration::updateValue('PSP_MULTIPLIER', (string)Tools::getValue('PSP_MULTIPLIER')); // Stringként mentjük a tizedes miatt
+            
+            // Shop 1 Settings
+            Configuration::updateValue('PSP_S1_URL', Tools::getValue('PSP_S1_URL'));
+            Configuration::updateValue('PSP_S1_MULTIPLIER', Tools::getValue('PSP_S1_MULTIPLIER'));
+            
+            // Shop 2 Settings
+            Configuration::updateValue('PSP_S2_URL', Tools::getValue('PSP_S2_URL'));
+            Configuration::updateValue('PSP_S2_MULTIPLIER', Tools::getValue('PSP_S2_MULTIPLIER'));
+            
             $output .= $this->displayConfirmation("Beállítások mentve.");
         }
 
-        // 3. Megjelenítés
-        return $output . $this->renderForm() . $this->renderBlacklistTable();
-    }
+        // Blacklist Hozzáadás
+        if (Tools::isSubmit('submitBlacklistAdd')) {
+            $ref = Tools::getValue('blacklist_ref');
+            $shopTarget = (int)Tools::getValue('blacklist_shop_target');
+            if ($this->addToBlacklist($ref, $shopTarget)) {
+                $output .= $this->displayConfirmation("Cikkszám ($ref) hozzáadva a Shop $shopTarget tiltólistához.");
+            }
+        }
+        
+        // Blacklist Törlés
+        if (Tools::isSubmit('deleteblacklist')) {
+            $id = (int)Tools::getValue('id_blacklist');
+            Db::getInstance()->delete($this->tableName, 'id_blacklist = ' . $id);
+            $output .= $this->displayConfirmation("Törölve.");
+        }
 
-    /**
-     * Fő űrlap renderelése
-     */
-    protected function renderForm(): string
-    {
-        $helper = new HelperForm();
-        $helper->show_toolbar = false;
-        $helper->table = $this->table;
-        $helper->module = $this;
-        $helper->default_form_language = $this->context->language->id;
-        $helper->identifier = $this->identifier;
-        $helper->submit_action = 'submitPriceSyncSettings';
-        $helper->currentIndex = $this->context->link->getAdminLink('AdminModules', false) . '&configure=' . $this->name . '&tab_module=' . $this->tab . '&module_name=' . $this->name;
-        $helper->token = Tools::getAdminTokenLite('AdminModules');
+        // Változók átadása a Smarty-nak
+        $this->context->smarty->assign([
+            'module_dir' => $this->_path,
+            'action_url' => $this->context->link->getAdminLink('AdminModules', true) . '&configure=' . $this->name,
+            
+            // Konfigurációs értékek
+            'psp_mode' => Configuration::get('PSP_MODE', 'OFF'),
+            'psp_token' => Configuration::get('PSP_TOKEN'),
+            'psp_s1_url' => Configuration::get('PSP_S1_URL'),
+            'psp_s1_multiplier' => Configuration::get('PSP_S1_MULTIPLIER', '1.5'),
+            'psp_s2_url' => Configuration::get('PSP_S2_URL'),
+            'psp_s2_multiplier' => Configuration::get('PSP_S2_MULTIPLIER', '85'),
 
-        $fieldsForm = [
-            'form' => [
-                'legend' => ['title' => 'Beállítások', 'icon' => 'icon-cogs'],
-                'input' => [
-                    [
-                        'type' => 'select',
-                        'label' => 'Működési Mód',
-                        'name' => 'PSP_MODE',
-                        'options' => [
-                            'query' => [
-                                ['id' => 'OFF', 'name' => 'Kikapcsolva'],
-                                ['id' => 'SENDER', 'name' => 'KÜLDŐ (Sender - Beszállító)'],
-                                ['id' => 'RECEIVER', 'name' => 'FOGADÓ (Receiver - Shop 1/2)'],
-                            ],
-                            'id' => 'id', 'name' => 'name'
-                        ],
-                    ],
-                    [
-                        'type' => 'text',
-                        'label' => 'Titkos Token (API Key)',
-                        'name' => 'PSP_TOKEN',
-                        'desc' => 'Ugyanannak kell lennie minden boltban!',
-                        'required' => true,
-                    ],
-                    // Sender beállítások
-                    [
-                        'type' => 'textarea',
-                        'label' => 'Cél URL-ek (Csak Sender módnál)',
-                        'name' => 'PSP_TARGETS',
-                        'desc' => 'Minden sorba egy URL. Pl: https://shop2.hu/module/pricesyncpro/api',
-                        'rows' => 3,
-                    ],
-                    // Receiver beállítások
-                    [
-                        'type' => 'select',
-                        'label' => 'Termék Azonosítás (Csak Receiver)',
-                        'name' => 'PSP_MATCH_BY',
-                        'options' => [
-                            'query' => [
-                                ['id' => 'reference', 'name' => 'Reference (Cikkszám) - Shop 2-höz'],
-                                ['id' => 'supplier_reference', 'name' => 'Supplier Reference - Shop 1-hez'],
-                            ],
-                            'id' => 'id', 'name' => 'name'
-                        ],
-                    ],
-                    [
-                        'type' => 'text',
-                        'label' => 'Ár Szorzó (Multiplier)',
-                        'name' => 'PSP_MULTIPLIER',
-                        'desc' => 'Pl: 1.5 (Shop 1) vagy 85 (Shop 2). Használj pontot tizedesnek.',
-                    ],
-                ],
-                'submit' => ['title' => 'Mentés', 'class' => 'btn btn-primary'],
-            ],
-        ];
+            // Listák
+            'blacklist_s1' => $this->getBlacklist(1),
+            'blacklist_s2' => $this->getBlacklist(2),
+            
+            // Statisztika (Dummy adatok a designhoz)
+            'last_sync_date' => date('Y-m-d H:i'),
+        ]);
 
-        // Értékek betöltése
-        $helper->fields_value['PSP_MODE'] = Configuration::get('PSP_MODE', 'OFF');
-        $helper->fields_value['PSP_TOKEN'] = Configuration::get('PSP_TOKEN');
-        $helper->fields_value['PSP_TARGETS'] = Configuration::get('PSP_TARGETS');
-        $helper->fields_value['PSP_MATCH_BY'] = Configuration::get('PSP_MATCH_BY', 'reference');
-        $helper->fields_value['PSP_MULTIPLIER'] = Configuration::get('PSP_MULTIPLIER', '1.0');
-
-        return $helper->generateForm([$fieldsForm]);
+        return $output . $this->display(__FILE__, 'views/templates/admin/configure.tpl');
     }
 
     /**
