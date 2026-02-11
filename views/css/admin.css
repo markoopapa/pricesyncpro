@@ -1,0 +1,15 @@
+/* Price Sync Pro Admin Stílus */
+#module_form .form-inline .form-group {
+    display: inline-block;
+    margin-right: 10px;
+    vertical-align: middle;
+}
+#module_form .table td {
+    vertical-align: middle;
+}
+.label-warning {
+    background-color: #f0ad4e;
+    color: white;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
