@@ -253,4 +253,58 @@ class PriceSyncPro extends Module
         curl_exec($ch);
         curl_close($ch);
     }
+
+    /**
+     * Segédfüggvény: Blacklist lekérése Shop ID alapján
+     */
+    protected function getBlacklist($shopId)
+    {
+        // Ellenőrizzük, hogy létezik-e a tábla (biztonsági okból)
+        $sql = "SELECT * FROM `" . _DB_PREFIX_ . $this->tableName . "` 
+                WHERE shop_id = " . (int)$shopId . "
+                ORDER BY date_add DESC";
+
+        // Ha a tábla még a régi (nincs shop_id), ez hibát dobna, ezért elkapjuk
+        try {
+            $items = Db::getInstance()->executeS($sql);
+        } catch (Exception $e) {
+            return [];
+        }
+
+        if (!$items) {
+            return [];
+        }
+        
+        // Kép és név keresése a termékekhez
+        foreach ($items as &$item) {
+             $id_product = (int)Product::getIdByReference($item['reference']);
+             $item['image_url'] = '';
+             $item['product_name'] = '<span class="text-muted">Ismeretlen termék</span>';
+             
+             if ($id_product) {
+                 $product = new Product($id_product, false, $this->context->language->id);
+                 if (Validate::isLoadedObject($product)) {
+                     $item['product_name'] = $product->name;
+                     $cover = Product::getCover($id_product);
+                     if ($cover) {
+                         $link = new Link();
+                         $item['image_url'] = $link->getImageLink($product->link_rewrite, (string)$cover['id_image'], 'small_default');
+                     }
+                 }
+             }
+        }
+        return $items;
+    }
+
+    /**
+     * Segédfüggvény: Hozzáadás a Blacklisthez
+     */
+    protected function addToBlacklist($ref, $shopId)
+    {
+        return Db::getInstance()->insert($this->tableName, [
+            'reference' => pSQL($ref),
+            'shop_id' => (int)$shopId,
+            'date_add' => date('Y-m-d H:i:s')
+        ]);
+    }
 }
