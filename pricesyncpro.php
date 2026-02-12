@@ -154,63 +154,53 @@ class PriceSyncPro extends Module
 
     protected function processBulkSyncBatch()
 {
-    // 1. STABILITÁS NÖVELÉSE (Hogy ne szakadjon meg a folyamat)
-    @ini_set('max_execution_time', 0); // Időkorlát kikapcsolása
-    @ini_set('memory_limit', '512M');  // Több memória
+    // --- BEÁLLÍTÁSOK ---
+    // Mivel azt mondtad, a 20-as régen ment, állítsuk vissza arra!
+    $limit = 20; 
     
     $offset = (int)Tools::getValue('offset', 0);
-    $limit = 10; // FONTOS: Csak 10 termék egyszerre, hogy biztosan végigfusson!
     $mode = Configuration::get('PSP_MODE');
-    
-    // Admin beállítások betöltése
     $exchangeRate = (float)Configuration::get('PSP_EXCHANGE_RATE');
-    if ($exchangeRate <= 0) $exchangeRate = 85; // Biztonsági alapértelmezett, ha nincs beállítva
+    if ($exchangeRate <= 0) $exchangeRate = 85; 
 
-    // 2. TERMÉKEK LEKÉRÉSE
+    // 1. LEKÉRJÜK A KÖVETKEZŐ ADAGOT (Mindig fix 20-at)
     $sql = 'SELECT id_product FROM ' . _DB_PREFIX_ . 'product WHERE active = 1 LIMIT ' . (int)$offset . ', ' . (int)$limit;
     $products = Db::getInstance()->executeS($sql);
 
-    // Ha nincs több termék, szabályosan lezárjuk
+    // Ha üres a lista, végeztünk
     if (empty($products)) {
-        if (ob_get_length()) ob_end_clean(); // Puffer törlése
+        if (ob_get_length()) ob_end_clean();
         header('Content-Type: application/json');
-        die(json_encode([
-            'finished' => true, 
-            'count' => 0, 
-            'offset' => $offset
-        ]));
+        die(json_encode(['finished' => true, 'count' => 0, 'offset' => $offset]));
     }
 
-    $count = 0;
+    $countSent = 0; // Csak azt számoljuk, amit tényleg elküldtünk
+
     foreach ($products as $p) {
         $product = new Product((int)$p['id_product']);
         
-        // 3. PONTOS ÁR LEKÉRÉSE (Ugyanúgy, mint a manuális mentésnél)
-        // A 'true' paraméterek biztosítják, hogy az AKCIÓS árat kapjuk meg
+        // Ár lekérése (akciósan)
         $price = Product::getPriceStatic((int)$product->id, true, null, 6, null, false, true);
 
-        // 4. KÜLDÉSI LOGIKA
+        // KÜLDÉSI LOGIKA
         $priceToSend = 0;
         $refToSend = '';
         $shouldSend = false;
 
         if ($mode === 'SENDER') {
-            // BESZÁLLÍTÓ: Saját cikkszám, eredeti ár
             if (!empty($product->reference)) {
                 $refToSend = $product->reference;
                 $priceToSend = $price;
                 $shouldSend = true;
             }
         } elseif ($mode === 'CHAIN') {
-            // ELECTROB.RO: Beszállítói azonosítás, de saját cikkszám küldése + Szorzás
             if (!empty($product->supplier_reference)) {
                 $refToSend = $product->reference; 
-                $priceToSend = $price * $exchangeRate; // Itt szorozzuk be!
+                $priceToSend = $price * $exchangeRate; 
                 $shouldSend = true;
             }
         }
 
-        // 5. KÜLDÉS VÉGREHAJTÁSA
         if ($shouldSend) {
             $payload = [
                 'reference' => $refToSend,
@@ -218,9 +208,7 @@ class PriceSyncPro extends Module
                 'token' => Configuration::get('PSP_TOKEN')
             ];
 
-            // Naplózás, hogy lássuk, mi történik
-            self::log($refToSend, "SYNC: Küldés folyamatban... Ár: $priceToSend", 'info');
-
+            // Webhook küldés
             if ($mode === 'SENDER') {
                 $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
                 foreach ($targets as $url) {
@@ -230,22 +218,25 @@ class PriceSyncPro extends Module
                 $nextUrl = Configuration::get('PSP_NEXT_SHOP_URL');
                 if (!empty($nextUrl)) $this->sendWebhook($nextUrl, $payload);
             }
-            $count++;
+            $countSent++;
         }
     }
 
-    // --- 6. KRITIKUS RÉSZ: A VÁLASZ LEZÁRÁSA ---
-    // Ez javítja az "undefined" hibát. Törlünk mindent, ami nem JSON.
+    // --- A JAVÍTÁS LÉNYEGE ---
     if (ob_get_length()) ob_end_clean();
     header('Content-Type: application/json');
 
+    // HIBA OKA VOLT: Eddig a $countSent-et adtuk hozzá, ami kevesebb lehetett mint a limit.
+    // MOST: Mindig a $limit-et (20) adjuk hozzá! Így biztosan tovább lép a következő adagra.
+    $newOffset = $offset + $limit;
+    
+    // Akkor van vége, ha az adatbázis kevesebbet adott vissza, mint amennyit kértünk
     $isFinished = (count($products) < $limit);
 
     die(json_encode([
         'finished' => $isFinished, 
-        'count' => $count, 
-        // Mindig a limitet adjuk hozzá, így stabilan lépked 10-esével
-        'offset' => $offset + $limit 
+        'count' => $countSent, 
+        'offset' => $newOffset // Ez a kulcs! Így nem ragad be.
     ]));
 }
 
