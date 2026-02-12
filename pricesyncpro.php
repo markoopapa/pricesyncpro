@@ -19,8 +19,8 @@ class PriceSyncPro extends Module
     {
         $this->name = 'pricesyncpro';
         $this->tab = 'administration';
-        $this->version = '1.1.0'; // Verzió emelés
-        $this->author = 'MP Development';
+        $this->version = '1.1.0';
+        $this->author = 'Markoo';
         $this->need_instance = 0;
         $this->bootstrap = true;
         parent::__construct();
