@@ -43,71 +43,54 @@ class PriceSyncProApiModuleFrontController extends ModuleFrontController
     }
 
     protected function processSync($data)
-    {
-        $ref = $data['reference']; // Beérkező kód (beszállítói vagy saját)
-        $incomingGross = (float)$data['price'];
+{
+    $ref = $data['reference']; 
+    $incomingGross = (float)$data['price'];
 
-        // 1. KERESÉS: Megnézzük a beszállítói mezőben ÉS a saját cikkszámban is
-        // Lekérjük az id_product-ot ÉS a belső reference mezőt is
-        $sql = 'SELECT id_product, reference FROM ' . _DB_PREFIX_ . 'product 
-                WHERE supplier_reference = "' . pSQL($ref) . '" 
-                OR reference = "' . pSQL($ref) . '"';
+    // 1. KERESÉS: supplier_reference VAGY reference alapján
+    $sql = 'SELECT id_product, reference FROM ' . _DB_PREFIX_ . 'product 
+            WHERE supplier_reference = "' . pSQL($ref) . '" 
+            OR reference = "' . pSQL($ref) . '"';
 
-        $row = Db::getInstance()->getRow($sql);
-        
-        if (!$row) {
-            return ['error' => 'Product not found'];
-        }
+    $row = Db::getInstance()->getRow($sql);
+    if (!$row) return ['error' => 'Product not found'];
 
-        $id_product = (int)$row['id_product'];
-        $internalRef = $row['reference']; // Ez a webshop saját, belső cikkszáma
+    $id_product = (int)$row['id_product'];
+    $internalRef = $row['reference'];
 
-        // 2. TILTÓLISTA ELLENŐRZÉSE: A belső cikkszám alapján nézzük
-        if ($this->isBlacklisted($internalRef)) {
-            PriceSyncPro::log($internalRef, "INFO: Tiltólistán van. Frissítés blokkolva.", 'warning');
-            return ['status' => 'skipped', 'reason' => 'Blacklisted'];
-        }
+    // 2. TILTÓLISTA (a saját belső cikkszám alapján)
+    if ($this->isBlacklisted($internalRef)) {
+        PriceSyncPro::log($internalRef, "INFO: Tiltólistán van, frissítés blokkolva.", 'warning');
+        return ['status' => 'skipped'];
+    }
 
-        // 3. TERMÉK BETÖLTÉSE ÉS SZORZÓ
-        $product = new Product($id_product);
-        $multiplier = (float)Configuration::get('PSP_MULTIPLIER', 1);
-        $targetGross = $incomingGross * $multiplier;
+    $product = new Product($id_product);
+    $multiplier = (float)Configuration::get('PSP_MULTIPLIER', 1);
+    $targetGross = $incomingGross * $multiplier;
 
-        // 4. KEREKÍTÉS (Pénznem specifikus)
-        $currency = Context::getContext()->currency;
-        if ($currency->iso_code === 'HUF') {
-            // Magyarország: 5-ös kerekítés
-            $targetGross = round($targetGross / 5) * 5;
-        } else {
-            // ROMÁN (RON) SPECIÁLIS LÉPCSŐZETES KEREKÍTÉS
-            if ($targetGross < 1) {
-                $targetGross = round($targetGross, 1); // 0.30, 0.80
-            } elseif ($targetGross >= 1 && $targetGross < 2) {
-                $targetGross = round($targetGross * 2) / 2; // 1.0, 1.5, 2.0
-            } else {
-                $targetGross = round($targetGross); // Egész szám (2, 6, 256)
-            }
-        }
+    // 3. KEREKÍTÉS (Automatikusan felismeri a bolt pénznemét)
+    $currency = Context::getContext()->currency;
+    if ($currency->iso_code === 'HUF') {
+        $targetGross = round($targetGross / 5) * 5;
+    } else {
+        if ($targetGross < 1) $targetGross = round($targetGross, 1);
+        elseif ($targetGross < 2) $targetGross = round($targetGross * 2) / 2;
+        else $targetGross = round($targetGross);
+    }
 
-        // 5. PONTOS NETTÓSÍTÁS ÉS MENTÉS
-        $taxRate = (float)$product->getTaxesRate();
-        $newNettoPrice = (float)Tools::ps_round($targetGross / (1 + ($taxRate / 100)), 6);
+    // 4. MENTÉS
+    $taxRate = (float)$product->getTaxesRate();
+    $newNettoPrice = (float)Tools::ps_round($targetGross / (1 + ($taxRate / 100)), 6);
 
-        // Csak akkor frissítünk, ha legalább 0.01 eltérés van a régi és az új nettó között
-        if (abs((float)$product->price - $newNettoPrice) > 0.01) {
-            $product->price = $newNettoPrice;
-            
-            if (!$product->update()) {
-                PriceSyncPro::log($internalRef, "HIBA: A termék mentése sikertelen.", 'error');
-                return ['error' => 'Save failed'];
-            }
-            
+    if (abs((float)$product->price - $newNettoPrice) > 0.01) {
+        $product->price = $newNettoPrice;
+        if ($product->update()) {
             PriceSyncPro::log($internalRef, "SIKER: Ár frissítve. Bruttó: $targetGross", 'success');
             return ['status' => 'success'];
         }
-
-        return ['status' => 'no_change'];
     }
+    return ['status' => 'no_change'];
+}
 	
 	protected function isBlacklisted($ref)
     {
