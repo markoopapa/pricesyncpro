@@ -68,7 +68,14 @@ class PriceSyncProApiModuleFrontController extends ModuleFrontController
         if ($currency->iso_code === 'HUF') {
             $targetGross = round($targetGross / 5) * 5;
         } else {
-            $targetGross = round($targetGross, 2);
+            // ROMÁN (RON) SPECIÁLIS LÉPCSŐZETES KEREKÍTÉS
+            if ($targetGross < 1) {
+                $targetGross = round($targetGross, 1);
+            } elseif ($targetGross >= 1 && $targetGross < 2) {
+                $targetGross = round($targetGross * 2) / 2;
+            } else {
+                $targetGross = round($targetGross);
+            }
         }
 
         // --- PONTOS NETTÓSÍTÁS PRESTASHOP SZABVÁNY SZERINT ---
