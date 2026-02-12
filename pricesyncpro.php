@@ -154,48 +154,51 @@ class PriceSyncPro extends Module
 
     protected function processBulkSyncBatch()
 {
-    // 1. BEÁLLÍTÁSOK
+    // --- 1. BEÁLLÍTÁSOK (Marad a 20-as limit, az stabil) ---
     $limit = 20; 
     $offset = (int)Tools::getValue('offset', 0);
     $mode = Configuration::get('PSP_MODE');
     
-    // Árfolyam betöltése
+    // Árfolyam
     $exchangeRate = (float)Configuration::get('PSP_EXCHANGE_RATE');
     if ($exchangeRate <= 0) $exchangeRate = 85; 
 
-    // 2. ADATBÁZIS LEKÉRDEZÉS
+    // --- 2. ADATBÁZIS LEKÉRÉS ---
     $sql = 'SELECT id_product FROM ' . _DB_PREFIX_ . 'product WHERE active = 1 LIMIT ' . (int)$offset . ', ' . (int)$limit;
     $products = Db::getInstance()->executeS($sql);
 
-    // Ha nincs több termék (ÜRES LISTA KEZELÉSE)
+    // Kiszámoljuk a "Batch" számot (hanyadik körnél tartunk)
+    // Ha offset = 0 -> page = 1. Ha offset = 20 -> page = 2.
+    $page = floor($offset / $limit) + 1;
+
+    // Ha nincs több termék
     if (empty($products)) {
         if (ob_get_length()) ob_end_clean();
         header('Content-Type: application/json');
-        // Itt is mindent visszaküldünk, hogy a JS értse, vége van
+        // Minden lehetséges néven elküldjük, hogy vége
         echo json_encode([
-            'finished' => true, 
-            'count' => 0, 
+            'finished' => true,
+            'count' => 0,
             'offset' => $offset,
-            'next_offset' => $offset,
-            'p' => $offset,
-            'page' => $offset
+            'page' => $page,
+            'p' => $page,
+            'index' => $page
         ]);
-        die(); 
+        die();
     }
 
-    // 3. FELDOLGOZÁS
+    // --- 3. OKOS LOGIKA (Ez a lényeg, ezt megtartjuk!) ---
     $countSent = 0;
     foreach ($products as $p) {
         $product = new Product((int)$p['id_product']);
         
-        // Ár + Akció
+        // Akciós ár lekérése
         $price = Product::getPriceStatic((int)$product->id, true, null, 6, null, false, true);
 
         $priceToSend = 0;
         $refToSend = '';
         $shouldSend = false;
 
-        // Logika
         if ($mode === 'SENDER') {
             if (!empty($product->reference)) {
                 $refToSend = $product->reference;
@@ -210,7 +213,6 @@ class PriceSyncPro extends Module
             }
         }
 
-        // Küldés
         if ($shouldSend) {
             $payload = [
                 'reference' => $refToSend,
@@ -231,26 +233,28 @@ class PriceSyncPro extends Module
         }
     }
 
-    // 4. A "MINDENT BELE" VÁLASZ (Universal Response)
+    // --- 4. A "BUTA" VÁLASZ (Hogy a progress bar örüljön) ---
     if (ob_get_length()) ob_end_clean();
     header('Content-Type: application/json');
 
-    $newOffset = $offset + $limit;
+    $nextOffset = $offset + $limit;
     $isFinished = (count($products) < $limit);
 
-    // Itt van a trükk: Több néven is elküldjük ugyanazt az adatot!
-    // Így ha a JavaScripted 'page'-t keres, megtalálja. Ha 'offset'-et, azt is.
+    // Itt a titok: Visszaküldjük az adatot MINDEN formában,
+    // amit a PrestaShop modulok valaha használtak.
     $response = [
         'finished' => $isFinished,
         'count' => $countSent,
-        // Standard nevek
-        'offset' => $newOffset,
-        'next_offset' => $newOffset,
-        'index' => $newOffset,
-        // PrestaShop-os szokások
-        'p' => ceil($newOffset / $limit),
-        'page' => ceil($newOffset / $limit),
-        'step' => $newOffset
+        
+        // Ez a standard
+        'offset' => $nextOffset,
+        
+        // Ezt keresheti a Batch # kiíráshoz:
+        'page' => $page,      // Batch #1, Batch #2...
+        'p' => $page,         // Rövidítve
+        'index' => $page,     // Indexként
+        'step' => $page,      // Lépésként
+        'batch_num' => $page  // Ha esetleg így hívják
     ];
 
     echo json_encode($response);
