@@ -219,7 +219,7 @@ class PriceSyncPro extends Module
 
     protected function processHook($params)
 {
-    // HIBAKERESŐ MÓD: Ez megakadályozza, hogy a kód "némán" leálljon
+    // HIBAKERESŐ MÓD
     try {
         static $is_processing = false;
         if ($is_processing) return;
@@ -243,35 +243,34 @@ class PriceSyncPro extends Module
         // 2. TERMÉK BETÖLTÉSE
         $product = new Product($id_product);
 
-        // NAPLÓZÁS: Lássuk, hogy él-e a rendszer!
-        // Ha ezt látod a naplóban, akkor a Hook működik.
         self::log($product->reference, "HOOK FUTÁS: Termék mentése érzékelve ($mode)", 'info');
 
-        // 3. KAPUŐR
-        if (empty($product->supplier_reference)) {
-            self::log($product->reference, "STOP: Nincs beszállítói cikkszám.", 'warning');
-            return; 
+        // --- 3. KAPUŐR (ITT VOLT A HIBA!) ---
+        
+        if ($mode === 'SENDER') {
+            // HA BESZÁLLÍTÓ VAGYUNK: A saját cikkszám (Reference) a fontos!
+            if (empty($product->reference)) {
+                self::log($product->id, "STOP: A terméknek nincs Cikkszáma (Reference)!", 'warning');
+                return;
+            }
+        } else {
+            // HA LÁNC (Electrob.ro) VAGYUNK: Kell a Beszállítói Cikkszám a továbbításhoz
+            if (empty($product->supplier_reference)) {
+                self::log($product->reference, "STOP: Nincs beszállítói cikkszám.", 'warning');
+                return; 
+            }
         }
+        // ------------------------------------
 
-        // 4. ÁR LEKÉRÉSE (HIBABIZTOS MÓDBAN)
-        // Itt szokott elhasalni, ezért védjük le!
-        
-        // Alapértelmezett ár (ha a lekérés nem sikerülne)
+        // 4. ÁR LEKÉRÉSE (Akciós is)
         $price = $product->price; 
-        
         try {
             $price = Product::getPriceStatic(
                 (int)$product->id, 
-                true,  // Bruttó
-                null, 
-                6, 
-                null, 
-                false, 
-                true   // IGEN, vonja le az akciót!
+                true, null, 6, null, false, true 
             );
         } catch (Exception $e) {
-            self::log($product->reference, "ÁR HIBA: Nem sikerült lekérni a pontos árat: " . $e->getMessage(), 'error');
-            // Ha hiba van, maradunk a sima árnál, de nem állunk le!
+            self::log($product->reference, "ÁR HIBA: " . $e->getMessage(), 'error');
             $price = $product->price; 
         }
 
@@ -282,13 +281,15 @@ class PriceSyncPro extends Module
             $priceToSend = $price * $exchangeRate;
             self::log($product->reference, "ÁTVÁLTÁS: $price RON * $exchangeRate = $priceToSend HUF", 'info');
         } else {
-            // SENDER (Beszállító)
+            // SENDER (Beszállító): Küldjük az eredetit
             $priceToSend = $price;
         }
 
         $token = Configuration::get('PSP_TOKEN');
         
+        // CIKKSZÁM KIVÁLASZTÁSA KÜLDÉSHEZ
         $refToSend = $product->reference;
+        // Ha nincs saját cikkszám (ritka), próbáljuk a másikat
         if (empty($refToSend)) {
              $refToSend = $product->supplier_reference;
         }
@@ -316,8 +317,7 @@ class PriceSyncPro extends Module
         }
 
     } catch (Exception $mainError) {
-        // HA BÁRMI MÁS BAJ VAN, EZT FOGOD LÁTNI A NAPLÓBAN:
-        self::log('SYSTEM', "KRITIKUS HIBA A HOOK-BAN: " . $mainError->getMessage(), 'error');
+        self::log('SYSTEM', "KRITIKUS HIBA: " . $mainError->getMessage(), 'error');
     }
 }
     public function sendWebhook($url, $data)
