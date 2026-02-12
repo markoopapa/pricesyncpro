@@ -219,7 +219,18 @@ class PriceSyncPro extends Module
         $count++;
     }
 
-    echo json_encode(['finished' => false, 'count' => $count]);
+    // --- JAVÍTOTT BEFEJEZÉS ---
+    ob_clean(); // Minden mást törlünk (szóközök, hibaüzenetek)
+    header('Content-Type: application/json');
+
+    // Ha kevesebb terméket találtunk, mint a limit (50), akkor végeztünk
+    $isFinished = ($count < $limit);
+
+    die(json_encode([
+        'finished' => $isFinished, 
+        'count' => $count, 
+        'offset' => $offset + $count
+    ]));
 }
 
     /**
