@@ -154,41 +154,48 @@ class PriceSyncPro extends Module
 
     protected function processBulkSyncBatch()
 {
-    // --- 1. BEÁLLÍTÁSOK ---
-    $limit = 20; // 20-asával haladunk (stabil)
+    // 1. BEÁLLÍTÁSOK
+    $limit = 20; 
     $offset = (int)Tools::getValue('offset', 0);
     $mode = Configuration::get('PSP_MODE');
     
+    // Árfolyam betöltése
     $exchangeRate = (float)Configuration::get('PSP_EXCHANGE_RATE');
     if ($exchangeRate <= 0) $exchangeRate = 85; 
 
-    // --- 2. ADATBÁZIS LEKÉRDEZÉS ---
-    // Mindig a következő 20 darabot kérjük le
+    // 2. ADATBÁZIS LEKÉRDEZÉS
     $sql = 'SELECT id_product FROM ' . _DB_PREFIX_ . 'product WHERE active = 1 LIMIT ' . (int)$offset . ', ' . (int)$limit;
     $products = Db::getInstance()->executeS($sql);
 
-    // Ha üres a lista (nincs több termék), lezárjuk
+    // Ha nincs több termék (ÜRES LISTA KEZELÉSE)
     if (empty($products)) {
         if (ob_get_length()) ob_end_clean();
         header('Content-Type: application/json');
-        echo json_encode(['finished' => true, 'count' => 0, 'offset' => $offset]);
-        die(); // Itt megáll a futás
+        // Itt is mindent visszaküldünk, hogy a JS értse, vége van
+        echo json_encode([
+            'finished' => true, 
+            'count' => 0, 
+            'offset' => $offset,
+            'next_offset' => $offset,
+            'p' => $offset,
+            'page' => $offset
+        ]);
+        die(); 
     }
 
-    // --- 3. FELDOLGOZÁS ---
+    // 3. FELDOLGOZÁS
     $countSent = 0;
-
     foreach ($products as $p) {
         $product = new Product((int)$p['id_product']);
         
-        // Akciós ár lekérése
+        // Ár + Akció
         $price = Product::getPriceStatic((int)$product->id, true, null, 6, null, false, true);
 
-        // Küldendő adatok előkészítése
         $priceToSend = 0;
         $refToSend = '';
         $shouldSend = false;
 
+        // Logika
         if ($mode === 'SENDER') {
             if (!empty($product->reference)) {
                 $refToSend = $product->reference;
@@ -224,27 +231,28 @@ class PriceSyncPro extends Module
         }
     }
 
-    // --- 4. VÁLASZ ÖSSZEÁLLÍTÁSA (Egyszerűsítve) ---
-    
-    // Takarítás (hogy tiszta legyen a válasz)
+    // 4. A "MINDENT BELE" VÁLASZ (Universal Response)
     if (ob_get_length()) ob_end_clean();
     header('Content-Type: application/json');
 
-    // Kiszámoljuk a következő lépést
-    // FONTOS: Mindig a limitet (20) adjuk hozzá, akkor is, ha nem küldtünk el mindent!
     $newOffset = $offset + $limit;
-    
-    // Akkor van vége, ha az adatbázis kevesebbet adott, mint 20
     $isFinished = (count($products) < $limit);
 
-    // Válasz objektum
+    // Itt van a trükk: Több néven is elküldjük ugyanazt az adatot!
+    // Így ha a JavaScripted 'page'-t keres, megtalálja. Ha 'offset'-et, azt is.
     $response = [
-        'finished' => $isFinished, 
-        'count' => $countSent, 
-        'offset' => $newOffset
+        'finished' => $isFinished,
+        'count' => $countSent,
+        // Standard nevek
+        'offset' => $newOffset,
+        'next_offset' => $newOffset,
+        'index' => $newOffset,
+        // PrestaShop-os szokások
+        'p' => ceil($newOffset / $limit),
+        'page' => ceil($newOffset / $limit),
+        'step' => $newOffset
     ];
 
-    // Kiírás és leállítás (Nincs többé ')))' zárójel hiba)
     echo json_encode($response);
     die();
 }
