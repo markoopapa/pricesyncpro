@@ -47,22 +47,25 @@ class PriceSyncProApiModuleFrontController extends ModuleFrontController
         $ref = $data['reference']; 
         $incomingGross = (float)$data['price'];
         
-        // --- INTELLIGENS KERESÉS (A Mód alapján döntünk) ---
+        // --- INTELLIGENS ÉS BIZTONSÁGOS KERESÉS ---
         $mode = Configuration::get('PSP_MODE');
 
-        if ($mode === 'RECEIVER') {
-            // SZIGORÚ MÓD (Elektrob.hu): 
-            // Itt csak a Reference-t nézzük, mert a Román oldal küldi a pontos cikkszámot.
-            // Így elkerüljük, hogy véletlenül egy régi beszállítói kódra akadjon.
+        if ($mode === 'CHAIN') {
+            // ELECTROB.RO (Román oldal):
+            // Itt a Beszállító küld adatot. SZIGORÚAN csak a supplier_reference-t nézzük!
+            // Így ha a beszállító cikkszáma véletlenül egyezik egy másik termékedével, nem lesz hiba.
+            $sql = 'SELECT id_product, reference FROM ' . _DB_PREFIX_ . 'product 
+                    WHERE supplier_reference = "' . pSQL($ref) . '"';
+        } elseif ($mode === 'RECEIVER') {
+            // ELEKTROB.HU (Magyar oldal):
+            // Itt az Electrob.ro küld, aki már a pontos saját cikkszámot (Reference) adja meg.
             $sql = 'SELECT id_product, reference FROM ' . _DB_PREFIX_ . 'product 
                     WHERE reference = "' . pSQL($ref) . '"';
         } else {
-            // MEGENGEDŐ MÓD (Electrob.ro / CHAIN):
-            // Itt a Beszállító küld, aki a supplier_reference-re hivatkozik.
-            // Ezért itt mindkettőben keresnünk kell!
+            // BIZTONSÁGI TARTALÉK:
             $sql = 'SELECT id_product, reference FROM ' . _DB_PREFIX_ . 'product 
-                    WHERE supplier_reference = "' . pSQL($ref) . '" 
-                    OR reference = "' . pSQL($ref) . '"';
+                    WHERE reference = "' . pSQL($ref) . '" 
+                    OR supplier_reference = "' . pSQL($ref) . '"';
         }
 
         $row = Db::getInstance()->getRow($sql);
