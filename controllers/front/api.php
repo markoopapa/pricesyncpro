@@ -44,58 +44,65 @@ class PriceSyncProApiModuleFrontController extends ModuleFrontController
 
     protected function processSync($data)
     {
-        $ref = $data['reference'];
+        $ref = $data['reference']; // Beérkező kód (beszállítói vagy saját)
         $incomingGross = (float)$data['price'];
-		
-		if ($this->isBlacklisted($ref)) {
-            // Ha tiltólistás, beírjuk a naplóba és nem csinálunk semmit
-            PriceSyncPro::log($ref, "INFO: Tiltólistán van. Beszállítói frissítés blokkolva.", 'warning');
-            return ['status' => 'skipped', 'reason' => 'Blacklisted'];
-        }
 
-        $id_product = (int)Db::getInstance()->getValue('SELECT id_product FROM ' . _DB_PREFIX_ . 'product WHERE reference = "' . pSQL($ref) . '"');
+        // 1. KERESÉS: Megnézzük a beszállítói mezőben ÉS a saját cikkszámban is
+        // Lekérjük az id_product-ot ÉS a belső reference mezőt is
+        $sql = 'SELECT id_product, reference FROM ' . _DB_PREFIX_ . 'product 
+                WHERE supplier_reference = "' . pSQL($ref) . '" 
+                OR reference = "' . pSQL($ref) . '"';
+
+        $row = Db::getInstance()->getRow($sql);
         
-        if (!$id_product) {
+        if (!$row) {
             return ['error' => 'Product not found'];
         }
 
+        $id_product = (int)$row['id_product'];
+        $internalRef = $row['reference']; // Ez a webshop saját, belső cikkszáma
+
+        // 2. TILTÓLISTA ELLENŐRZÉSE: A belső cikkszám alapján nézzük
+        if ($this->isBlacklisted($internalRef)) {
+            PriceSyncPro::log($internalRef, "INFO: Tiltólistán van. Frissítés blokkolva.", 'warning');
+            return ['status' => 'skipped', 'reason' => 'Blacklisted'];
+        }
+
+        // 3. TERMÉK BETÖLTÉSE ÉS SZORZÓ
         $product = new Product($id_product);
         $multiplier = (float)Configuration::get('PSP_MULTIPLIER', 1);
         $targetGross = $incomingGross * $multiplier;
 
-        // Kerekítés a bolt pénzneme szerint
+        // 4. KEREKÍTÉS (Pénznem specifikus)
         $currency = Context::getContext()->currency;
         if ($currency->iso_code === 'HUF') {
+            // Magyarország: 5-ös kerekítés
             $targetGross = round($targetGross / 5) * 5;
         } else {
             // ROMÁN (RON) SPECIÁLIS LÉPCSŐZETES KEREKÍTÉS
             if ($targetGross < 1) {
-                $targetGross = round($targetGross, 1);
+                $targetGross = round($targetGross, 1); // 0.30, 0.80
             } elseif ($targetGross >= 1 && $targetGross < 2) {
-                $targetGross = round($targetGross * 2) / 2;
+                $targetGross = round($targetGross * 2) / 2; // 1.0, 1.5, 2.0
             } else {
-                $targetGross = round($targetGross);
+                $targetGross = round($targetGross); // Egész szám (2, 6, 256)
             }
         }
 
-        // --- PONTOS NETTÓSÍTÁS PRESTASHOP SZABVÁNY SZERINT ---
+        // 5. PONTOS NETTÓSÍTÁS ÉS MENTÉS
         $taxRate = (float)$product->getTaxesRate();
-        $newNettoPrice = $targetGross / (1 + ($taxRate / 100));
-        
-        // A PrestaShop 6 tizedesjegyet vár a nettó árnál
-        $newNettoPrice = (float)Tools::ps_round($newNettoPrice, 6);
+        $newNettoPrice = (float)Tools::ps_round($targetGross / (1 + ($taxRate / 100)), 6);
 
-        // Csak akkor frissítünk, ha legalább 0.01 eltérés van
+        // Csak akkor frissítünk, ha legalább 0.01 eltérés van a régi és az új nettó között
         if (abs((float)$product->price - $newNettoPrice) > 0.01) {
             $product->price = $newNettoPrice;
             
-            // Hibakezelés a mentésnél
             if (!$product->update()) {
-                PriceSyncPro::log($ref, "HIBA: A termék mentése sikertelen.", 'error');
+                PriceSyncPro::log($internalRef, "HIBA: A termék mentése sikertelen.", 'error');
                 return ['error' => 'Save failed'];
             }
             
-            PriceSyncPro::log($ref, "SIKER: Ár frissítve. Bruttó: $targetGross", 'success');
+            PriceSyncPro::log($internalRef, "SIKER: Ár frissítve. Bruttó: $targetGross", 'success');
             return ['status' => 'success'];
         }
 
