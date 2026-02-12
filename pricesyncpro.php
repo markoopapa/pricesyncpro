@@ -251,9 +251,22 @@ class PriceSyncPro extends Module
         return; 
     }
 
-    // 5. Adatok előkészítése (Az electrob.ro-n már a módosított bruttó árat kérjük le)
-    $priceToSend = $product->getPrice(true); 
+    // 5. ADATOK ELŐKÉSZÍTÉSE - Speciális akciós ár lekérése
+    $id_product = (int)$product->id;
+    $priceToSend = Product::getPriceStatic(
+        $id_product, 
+        true,   // Bruttó ár lekérése
+        null,   // Alapértelmezett kombináció
+        6,      // Tizedesjegyek száma
+        null, 
+        false,  // Csak a kedvezmény értékét ne (az új árat kérjük)
+        true    // IGEN: Alkalmazza a leárazást (with_reduc)
+    );
+
     $token = Configuration::get('PSP_TOKEN');
+
+    // Logoljuk, hogy lássuk az akciós árat a naplóban
+    self::log($product->reference, "ÁR ELŐKÉSZÍTVE: " . $priceToSend . " (Akciókkal együtt)", 'info');
 
     $payload = [
         'reference' => $product->reference, // A saját cikkszámunkat küldjük tovább
@@ -278,7 +291,6 @@ class PriceSyncPro extends Module
         $nextUrl = Configuration::get('PSP_NEXT_SHOP_URL');
         if (!empty($nextUrl)) {
             $this->sendWebhook($nextUrl, $payload);
-            // Itt töröltük a siker logot, hogy ne szemeteljen, csak a hibát hagyjuk meg
         } else {
             self::log($product->reference, "CHAIN HIBA: Nincs megadva a 'Következő Shop URL'!", 'error');
         }
