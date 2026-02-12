@@ -1,37 +1,31 @@
 <?php
 /**
- * Price Sync Pro
- * Dashboard Design Update - FINAL VERSION
+ * Price Sync Pro - LOGGING VERSION
  */
-
 declare(strict_types=1);
 
-if (!defined('_PS_VERSION_')) {
-    exit;
-}
+if (!defined('_PS_VERSION_')) { exit; }
 
 use PrestaShop\PrestaShop\Adapter\Entity\Product;
 use PrestaShop\PrestaShop\Adapter\Entity\Db;
-use PrestaShop\PrestaShop\Adapter\Entity\Link;
-use PrestaShop\PrestaShop\Adapter\Entity\Validate;
 
 class PriceSyncPro extends Module
 {
     protected $tableName = 'pricesyncpro_blacklist';
+    protected $logTable = 'pricesyncpro_logs';
+    protected static $already_sent = [];
 
     public function __construct()
     {
         $this->name = 'pricesyncpro';
         $this->tab = 'administration';
-        $this->version = '1.0.0';
+        $this->version = '1.1.0'; // Verzió emelés
         $this->author = 'MP Development';
         $this->need_instance = 0;
         $this->bootstrap = true;
-
         parent::__construct();
-
         $this->displayName = $this->trans('Price Sync Pro', [], 'Modules.Pricesyncpro.Admin');
-        $this->description = $this->trans('Árszinkronizáló Dashboard felülettel.', [], 'Modules.Pricesyncpro.Admin');
+        $this->description = $this->trans('Árszinkronizáló Naplózással.', [], 'Modules.Pricesyncpro.Admin');
         $this->ps_versions_compliancy = ['min' => '1.7.0.0', 'max' => _PS_VERSION_];
     }
 
@@ -41,20 +35,21 @@ class PriceSyncPro extends Module
             $this->registerHook('actionProductUpdate') &&
             $this->registerHook('actionProductAdd') &&
             $this->registerHook('displayBackOfficeHeader') &&
+            $this->registerHook('actionObjectProductUpdateAfter') &&
             $this->installDb();
     }
 
     public function uninstall(): bool
     {
+        // Opcionális: Logok törlése uninstallkor
+        // Db::getInstance()->execute("DROP TABLE IF EXISTS `" . _DB_PREFIX_ . $this->logTable . "`");
         return parent::uninstall();
     }
 
     protected function installDb(): bool
     {
-        // Töröljük a régit, ha nem kompatibilis (opcionális, de fejlesztésnél hasznos)
-        // Db::getInstance()->execute("DROP TABLE IF EXISTS `" . _DB_PREFIX_ . $this->tableName . "`");
-
-        $sql = "CREATE TABLE IF NOT EXISTS `" . _DB_PREFIX_ . $this->tableName . "` (
+        // Blacklist tábla
+        $sql1 = "CREATE TABLE IF NOT EXISTS `" . _DB_PREFIX_ . $this->tableName . "` (
             `id_blacklist` int(11) unsigned NOT NULL AUTO_INCREMENT,
             `reference` varchar(64) NOT NULL,
             `shop_id` int(1) DEFAULT 1,
@@ -63,9 +58,21 @@ class PriceSyncPro extends Module
             UNIQUE KEY `idx_ref` (`reference`, `shop_id`)
         ) ENGINE=" . _MYSQL_ENGINE_ . " DEFAULT CHARSET=utf8;";
 
-        return Db::getInstance()->execute($sql);
+        // ÚJ: LOG TÁBLA
+        $sql2 = "CREATE TABLE IF NOT EXISTS `" . _DB_PREFIX_ . $this->logTable . "` (
+            `id_log` int(11) unsigned NOT NULL AUTO_INCREMENT,
+            `reference` varchar(64) NOT NULL,
+            `message` text NOT NULL,
+            `type` varchar(20) NOT NULL, -- success, error, warning
+            `date_add` datetime NOT NULL,
+            PRIMARY KEY (`id_log`),
+            KEY `idx_date` (`date_add`)
+        ) ENGINE=" . _MYSQL_ENGINE_ . " DEFAULT CHARSET=utf8;";
+
+        return Db::getInstance()->execute($sql1) && Db::getInstance()->execute($sql2);
     }
 
+    // ... (hookDisplayBackOfficeHeader maradhat) ...
     public function hookDisplayBackOfficeHeader()
     {
         if ($this->context->controller->php_self == 'AdminModules' && Tools::getValue('configure') == $this->name) {
@@ -73,75 +80,138 @@ class PriceSyncPro extends Module
         }
     }
 
-    /**
-     * DASHBOARD LOGIKA
-     */
     public function getContent(): string
     {
+        // AJAX Bulk Sync kezelés (Maradhat a régi, vagy amit az előbb küldtem)
+        if (Tools::isSubmit('ajax_bulk_sync')) { $this->processBulkSyncBatch(); exit; }
+
         $output = '';
 
-        // 1. Mentés
+        // Beállítások mentése
         if (Tools::isSubmit('submitPriceSyncConfig')) {
             Configuration::updateValue('PSP_MODE', Tools::getValue('PSP_MODE'));
             Configuration::updateValue('PSP_TOKEN', Tools::getValue('PSP_TOKEN'));
-            Configuration::updateValue('PSP_S1_URL', Tools::getValue('PSP_S1_URL'));
-            Configuration::updateValue('PSP_S1_MULTIPLIER', Tools::getValue('PSP_S1_MULTIPLIER'));
-            Configuration::updateValue('PSP_S2_URL', Tools::getValue('PSP_S2_URL'));
-            Configuration::updateValue('PSP_S2_MULTIPLIER', Tools::getValue('PSP_S2_MULTIPLIER'));
-            
+            Configuration::updateValue('PSP_TARGET_URLS', Tools::getValue('PSP_TARGET_URLS'));
+            Configuration::updateValue('PSP_MATCH_BY', Tools::getValue('PSP_MATCH_BY'));
+            Configuration::updateValue('PSP_MULTIPLIER', Tools::getValue('PSP_MULTIPLIER'));
+            Configuration::updateValue('PSP_NEXT_SHOP_URL', Tools::getValue('PSP_NEXT_SHOP_URL'));
+            Configuration::updateValue('PSP_CHAIN_MULTIPLIER', Tools::getValue('PSP_CHAIN_MULTIPLIER'));
             $output .= $this->displayConfirmation("Beállítások mentve.");
         }
 
-        // 2. Blacklist Hozzáadás
-        if (Tools::isSubmit('submitBlacklistAdd')) {
-            $ref = Tools::getValue('blacklist_ref');
-            $shopTarget = (int)Tools::getValue('blacklist_shop_target');
-            
-            if (!empty($ref)) {
-                if ($this->addToBlacklist($ref, $shopTarget)) {
-                    $output .= $this->displayConfirmation("Cikkszám ($ref) hozzáadva a Shop $shopTarget tiltólistához.");
-                } else {
-                    $output .= $this->displayError("Hiba: Már létezik vagy adatbázis hiba.");
-                }
-            }
-        }
-        
-        // 3. Blacklist Törlés
-        if (Tools::isSubmit('deleteblacklist')) {
-            $id = (int)Tools::getValue('id_blacklist');
-            Db::getInstance()->delete($this->tableName, 'id_blacklist = ' . $id);
-            $output .= $this->displayConfirmation("Törölve.");
+        // LOG TÖRLÉS
+        if (Tools::isSubmit('clear_logs')) {
+            Db::getInstance()->execute('TRUNCATE TABLE ' . _DB_PREFIX_ . $this->logTable);
+            $output .= $this->displayConfirmation("Napló törölve.");
         }
 
-        // Változók átadása a TPL-nek
+        // Blacklist kezelés...
+        if (Tools::isSubmit('submitBlacklistAdd')) { $this->addToBlacklist(Tools::getValue('blacklist_ref'), 1); }
+        if (Tools::isSubmit('deleteblacklist')) { Db::getInstance()->delete($this->tableName, 'id_blacklist='.(int)Tools::getValue('id_blacklist')); }
+
         $this->context->smarty->assign([
             'module_dir' => $this->_path,
             'action_url' => $this->context->link->getAdminLink('AdminModules', true) . '&configure=' . $this->name,
+            'ajax_url' => $this->context->link->getAdminLink('AdminModules', true) . '&configure=' . $this->name . '&ajax_bulk_sync=1',
             
             'psp_mode' => Configuration::get('PSP_MODE', 'OFF'),
             'psp_token' => Configuration::get('PSP_TOKEN'),
-            'psp_s1_url' => Configuration::get('PSP_S1_URL'),
-            'psp_s1_multiplier' => Configuration::get('PSP_S1_MULTIPLIER', '1.5'),
-            'psp_s2_url' => Configuration::get('PSP_S2_URL'),
-            'psp_s2_multiplier' => Configuration::get('PSP_S2_MULTIPLIER', '85'),
-
-            'blacklist_s1' => $this->getBlacklist(1),
-            'blacklist_s2' => $this->getBlacklist(2),
+            'psp_target_urls' => Configuration::get('PSP_TARGET_URLS'),
+            'psp_multiplier' => Configuration::get('PSP_MULTIPLIER', '1.5'),
+            'psp_match_by' => Configuration::get('PSP_MATCH_BY', 'reference'),
+            'psp_next_shop_url' => Configuration::get('PSP_NEXT_SHOP_URL'),
+            'psp_chain_multiplier' => Configuration::get('PSP_CHAIN_MULTIPLIER', '85'),
             
-            'last_sync_date' => date('Y-m-d H:i'),
+            'blacklist' => $this->getBlacklist(), 
+            'logs' => $this->getLogs(), // Logok lekérése
+            'total_products' => (int)Db::getInstance()->getValue('SELECT count(id_product) FROM ' . _DB_PREFIX_ . 'product WHERE active=1'),
         ]);
 
         return $output . $this->display(__FILE__, 'views/templates/admin/configure.tpl');
     }
 
+    protected function getLogs()
+    {
+        // Utolsó 100 bejegyzés
+        return Db::getInstance()->executeS("SELECT * FROM `" . _DB_PREFIX_ . $this->logTable . "` ORDER BY date_add DESC LIMIT 100");
+    }
+
+    // STATIKUS LOGOLÓ FÜGGVÉNY (Ezt hívjuk majd az API-ból)
+    public static function log($reference, $message, $type = 'info')
+    {
+        // Biztonsági ellenőrzés, hogy az adatbázis elérhető-e
+        try {
+            Db::getInstance()->insert('pricesyncpro_logs', [
+                'reference' => pSQL($reference),
+                'message' => pSQL($message),
+                'type' => pSQL($type),
+                'date_add' => date('Y-m-d H:i:s')
+            ]);
+        } catch (Exception $e) {
+            // Ha nem tud írni a logba, ne fagyassza le az egész oldalt (HTTP 500 ellen)
+        }
+    }
+
     /**
-     * HOOK: Termék Frissítése (Sender Logic)
+     * ÚJ FÜGGVÉNY: A Tömeges Szinkronizálás Logikája (Batch)
+     */
+    protected function processBulkSyncBatch()
+    {
+        header('Content-Type: application/json');
+
+        $page = (int)Tools::getValue('page', 1); // Hanyadik adagnál tartunk
+        $limit = 20; // Csak 20 termék egyszerre (Biztonságos!)
+        $offset = ($page - 1) * $limit;
+
+        // Csak aktív termékeket kérünk le
+        $sql = 'SELECT id_product FROM ' . _DB_PREFIX_ . 'product WHERE active = 1 LIMIT ' . $offset . ', ' . $limit;
+        $products = Db::getInstance()->executeS($sql);
+
+        if (empty($products)) {
+            echo json_encode(['finished' => true, 'count' => 0]);
+            return;
+        }
+
+        $processed = 0;
+        foreach ($products as $row) {
+            $product = new Product((int)$row['id_product']);
+            $params = ['product' => $product];
+            $this->processHook($params);
+            
+            $processed++;
+        }
+
+        echo json_encode([
+            'finished' => false,
+            'page' => $page,
+            'processed_count' => $processed,
+            'next_page' => $page + 1
+        ]);
+    }
+
+    /**
+     * HOOK: Termék Frissítése (CSAK A BESZÁLLÍTÓNÁL FUT)
      */
     public function hookActionProductUpdate($params)
     {
         $this->processHook($params);
     }
-
+    
+    /**
+     * Ez a "Mélyebb" hook. Akkor is lefut, ha az importáló modul
+     * nem hívja meg direktben a termék frissítést, de menti az adatbázisba az objektumot.
+     */
+    public function hookActionObjectProductUpdateAfter($params)
+    {
+        // Elkerüljük a duplikálást: Ha a sima hook már lefutott, ezt ne futtassuk
+        // Ezt egy statikus változóval vagy egyszerű logikával szűrhetjük,
+        // de a legegyszerűbb, ha hagyjuk lefutni, a fogadó oldal úgyis csak akkor ment, ha változott az ár.
+        
+        if (isset($params['object']) && $params['object'] instanceof Product) {
+            $this->processHook(['product' => $params['object']]);
+        }
+    }
+    
     public function hookActionProductAdd($params)
     {
         $this->processHook($params);
@@ -149,10 +219,23 @@ class PriceSyncPro extends Module
 
     protected function processHook($params)
     {
-        if (Configuration::get('PSP_MODE') !== 'SENDER') {
+        
+        static $is_processing = false;
+        if ($is_processing) return;
+        $is_processing = true;
+        
+        $id_product = isset($params['id_product']) ? (int)$params['id_product'] : (isset($params['product']->id) ? (int)$params['product']->id : 0);
+        if ($id_product && isset(self::$already_sent[$id_product])) return;
+        self::$already_sent[$id_product] = true;
+        
+        $mode = Configuration::get('PSP_MODE');
+
+        // 1. Ha KIKAPCSOLT vagy csak FOGADÓ (Receiver), akkor nem csinálunk semmit
+        if ($mode === 'OFF' || $mode === 'RECEIVER') {
             return;
         }
 
+        // Termék betöltése
         if (!isset($params['product'])) {
              if (isset($params['id_product'])) {
                 $product = new Product((int)$params['id_product']);
@@ -163,25 +246,53 @@ class PriceSyncPro extends Module
             $product = $params['product'];
         }
 
-        // Bruttó ár lekérése kedvezménnyel
+        // Aktuális Bruttó (Akciós) ár lekérése
         $price = Product::getPriceStatic($product->id, true, null, 6, null, false, true);
+        $token = Configuration::get('PSP_TOKEN');
 
-        $payload = [
-            'reference' => $product->reference,
-            'price' => $price,
-            'token' => Configuration::get('PSP_TOKEN')
-        ];
+        // --- A. HA BESZÁLLÍTÓ VAGYOK (SENDER) ---
+        if ($mode === 'SENDER') {
+            $payload = [
+                'reference' => $product->reference,
+                'price' => $price, // Nyers ár
+                'token' => $token
+            ];
 
-        // Küldés Shop 1-nek
-        $url1 = Configuration::get('PSP_S1_URL');
-        if (!empty($url1)) {
-            $this->sendWebhook($url1, $payload);
+            // Küldés a listának (Minmag + Electrob)
+            $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
+            foreach ($targets as $url) {
+                $url = trim($url);
+                if (!empty($url)) {
+                    $this->sendWebhook($url, $payload);
+                }
+            }
         }
 
-        // Küldés Shop 2-nek
-        $url2 = Configuration::get('PSP_S2_URL');
-        if (!empty($url2)) {
-            $this->sendWebhook($url2, $payload);
+        // --- B. HA KÖZTES SHOP VAGYOK (CHAIN - Electrob.ro) ---
+        elseif ($mode === 'CHAIN') {
+            $chainMultiplier = (float)Configuration::get('PSP_CHAIN_MULTIPLIER');
+            if ($chainMultiplier <= 0) $chainMultiplier = 1;
+
+            $priceToSend = $price * $chainMultiplier;
+            
+            // LOG: Tudjuk meg, hogy a hook egyáltalán eljutott-e idáig
+            self::log($product->reference, "CHAIN: Folyamat indul. Számolt ár küldéshez: " . $priceToSend, 'info');
+
+            $payload = [
+                'reference' => $product->reference,
+                'price' => $priceToSend,
+                'token' => $token
+            ];
+
+            $nextUrl = Configuration::get('PSP_NEXT_SHOP_URL');
+
+            if (!empty($nextUrl)) {
+                // Megpróbáljuk a küldést
+                $this->sendWebhook($nextUrl, $payload);
+            } else {
+                // LOG: Ha elfelejtetted beírni a magyar shop URL-jét
+                self::log($product->reference, "CHAIN HIBA: Nincs megadva a 'Következő Shop URL'!", 'error');
+            }
         }
     }
 
@@ -192,60 +303,63 @@ class PriceSyncPro extends Module
         curl_setopt($ch, CURLOPT_POST, true);
         curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
         curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 2);
-        curl_exec($ch);
-        curl_close($ch);
-    }
-
-    /**
-     * SEGÉDFÜGGVÉNY: Blacklist lekérése Shop ID alapján
-     */
-    protected function getBlacklist($shopId)
-    {
-        $sql = "SELECT * FROM `" . _DB_PREFIX_ . $this->tableName . "` 
-                WHERE shop_id = " . (int)$shopId . "
-                ORDER BY date_add DESC";
-
-        try {
-            $items = Db::getInstance()->executeS($sql);
-        } catch (Exception $e) {
-            return [];
-        }
-
-        if (!$items) {
-            return [];
-        }
+        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
         
-        foreach ($items as &$item) {
-             $id_product = (int)Product::getIdByReference($item['reference']);
-             $item['image_url'] = '';
-             $item['product_name'] = '<span class="text-muted">Ismeretlen termék</span>';
-             
-             if ($id_product) {
-                 $product = new Product($id_product, false, $this->context->language->id);
-                 if (Validate::isLoadedObject($product)) {
-                     $item['product_name'] = $product->name;
-                     $cover = Product::getCover($id_product);
-                     if ($cover) {
-                         $link = new Link();
-                         $item['image_url'] = $link->getImageLink($product->link_rewrite, (string)$cover['id_image'], 'small_default');
-                     }
-                 }
-             }
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+        curl_close($ch);
+        
+        if ($error) {
+            self::log($data['reference'], "CURL HIBA: " . $error, 'error');
+        } elseif ($httpCode !== 200) {
+            // CSAK AKKOR NAPLÓZUNK, HA NEM 200 (TEHÁT HIBA VAN)
+            self::log($data['reference'], "Szerver válasza (HTTP $httpCode): " . substr($response, 0, 100), 'error');
         }
-        return $items;
+        // Ha HTTP 200, akkor nem írunk semmit, így tiszta marad a napló.
     }
 
-    /**
-     * SEGÉDFÜGGVÉNY: Hozzáadás a Blacklisthez
-     */
+    public function getBlacklist()
+{
+    $sql = 'SELECT * FROM `' . _DB_PREFIX_ . $this->tableName . '` ORDER BY id_blacklist DESC';
+    $res = Db::getInstance()->executeS($sql);
+    
+    if (!$res) return [];
+
+    $link = Context::getContext()->link;
+
+    foreach ($res as &$item) {
+        // 1. Termék keresése cikkszám alapján
+        $id_product = (int)Product::getIdByReference($item['reference']);
+        
+        if ($id_product > 0) {
+            $product = new Product($id_product, false, Context::getContext()->language->id);
+            $item['product_name'] = $product->name;
+
+            // 2. Borítókép (Cover) lekérése
+            $image = Image::getCover($id_product);
+            if ($image) {
+                // Legeneráljuk a kiskép URL-jét (small_default vagy cart_default)
+                $item['image_url'] = $link->getImageLink($product->link_rewrite, $image['id_image'], 'small_default');
+            } else {
+                $item['image_url'] = ''; // Nincs kép
+            }
+        } else {
+            $item['product_name'] = 'Ismeretlen termék';
+            $item['image_url'] = '';
+        }
+    }
+
+    return $res;
+}
+
     protected function addToBlacklist($ref, $shopId)
     {
-        // Duplikáció elkerülése végett töröljük, ha már van (bár az insert ignore is jó lenne)
-        // De itt most simán insert, mert van Unique kulcs a DB-ben
         return Db::getInstance()->insert($this->tableName, [
             'reference' => pSQL($ref),
-            'shop_id' => (int)$shopId,
+            'shop_id' => 1,
             'date_add' => date('Y-m-d H:i:s')
         ]);
     }
