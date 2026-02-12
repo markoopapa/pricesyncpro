@@ -248,6 +248,8 @@ class PriceSyncPro extends Module
     }
 
     // 4. ALAP ÁR LEKÉRÉSE (RON-ban)
+    $specific_price_output = null; 
+
     // Ez hozza az akciós árat (pl. 54 RON)
     $priceRON = Product::getPriceStatic(
         $id_product, true, null, 6, null, false, true, 1, false, null, null, null, $specific_price_output, true, true, null, true
