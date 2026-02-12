@@ -176,7 +176,7 @@ class PriceSyncPro extends Module
         foreach ($products as $row) {
             $product = new Product((int)$row['id_product']);
             $params = ['product' => $product];
-            $this->processHook($params);
+            $this->($params);
             
             $processed++;
         }
@@ -194,7 +194,7 @@ class PriceSyncPro extends Module
      */
     public function hookActionProductUpdate($params)
     {
-        $this->processHook($params);
+        $this->($params);
     }
     
     /**
@@ -208,7 +208,7 @@ class PriceSyncPro extends Module
         // de a legegyszerűbb, ha hagyjuk lefutni, a fogadó oldal úgyis csak akkor ment, ha változott az ár.
         
         if (isset($params['object']) && $params['object'] instanceof Product) {
-            $this->processHook(['product' => $params['object']]);
+            $this->(['product' => $params['object']]);
         }
     }
     
@@ -222,87 +222,75 @@ class PriceSyncPro extends Module
     static $is_processing = false;
     if ($is_processing) return;
     $is_processing = true;
-    
-    // 1. Termék azonosítása
-    $id_product = isset($params['id_product']) ? (int)$params['id_product'] : (isset($params['product']->id) ? (int)$params['product']->id : 0);
-    if ($id_product && isset(self::$already_sent[$id_product])) return;
+
+    // 1. ID MEGSZERZÉSE (Ez a legbiztosabb pont)
+    $id_product = 0;
+    if (isset($params['id_product'])) {
+        $id_product = (int)$params['id_product'];
+    } elseif (isset($params['product']->id)) {
+        $id_product = (int)$params['product']->id;
+    }
+
+    if (!$id_product) return;
+
+    // VÉDELEM: Ne fussunk le kétszer ugyanarra
+    if (isset(self::$already_sent[$id_product])) return;
     self::$already_sent[$id_product] = true;
-    
+
     $mode = Configuration::get('PSP_MODE');
+    if ($mode === 'OFF' || $mode === 'RECEIVER') return;
 
-    // 2. Kilépés, ha nincs dolgunk
-    if ($mode === 'OFF' || $mode === 'RECEIVER') {
-        return;
-    }
+    // 2. ÚJRATÖLTÉS (A HIBA JAVÍTÁSA!)
+    // Nem bízunk a kapott paraméterben, betöltjük frissen az adatbázisból!
+    $product = new Product($id_product);
 
-    // 3. Termék betöltése
-    if (!isset($params['product'])) {
-        if ($id_product) {
-            $product = new Product($id_product);
-        } else {
-            return;
-        }
-    } else {
-        $product = $params['product'];
-    }
-
-    // 4. KAPUŐR: Csak beszállítói cikkszámmal rendelkező termék mehet tovább
+    // 3. KAPUŐR: Beszállítói cikkszám ellenőrzése
     if (empty($product->supplier_reference)) {
+        // Ha nincs beszállítói kód, nem csinálunk semmit
         return; 
     }
 
-    // 5. ADATOK ELŐKÉSZÍTÉSE - Speciális akciós ár lekérése
-    $id_product = (int)$product->id;
+    // 4. AZONOSÍTÓK ELLENŐRZÉSE (LOG)
+    // Most már biztosan a jó adatokat látjuk
+    $myReference = $product->reference;          // Ez a 67403 (Saját)
+    $supplierRef = $product->supplier_reference; // Ez a 03674 (Beszállító)
+
+    // Ha a saját cikkszám üres, akkor baj van, nem tudjuk mit küldjünk
+    if (empty($myReference)) {
+        self::log($supplierRef, "HIBA: A terméknek nincs saját cikkszáma (Reference mező üres)!", 'error');
+        return;
+    }
+
+    // 5. ÁR LEKÉRÉSE (Akciósan)
     $priceToSend = Product::getPriceStatic(
-        (int)$product->id, 
-    true,   // Bruttó
-    null, 
-    6, 
-    null, 
-    false, 
-    true,   // Akcióval
-    1,      // Mennyiség
-    false, 
-    null,   // Nincs csoport megkötés
-    null,   // Nincs kategória megkötés
-    null, 
-    $specific_prices, 
-    true,   // Adóval
-    true,   // Akcióval!
-    Context::getContext()->cart, 
-    true
-);
+        $id_product, true, null, 6, null, false, true, 1, false, null, null, null, $specific_price_output, true, true, null, true
+    );
 
     $token = Configuration::get('PSP_TOKEN');
 
-    // Logoljuk, hogy lássuk az akciós árat a naplóban
-    self::log($product->reference, "ÁR ELŐKÉSZÍTVE: " . $priceToSend . " (Akciókkal együtt)", 'info');
+    // DEBUG LOG: Lássuk pontosan, mit küldünk!
+    self::log($myReference, "KÜLDÉS: Saját Ref: $myReference | Ár: $priceToSend", 'info');
 
     $payload = [
-        'reference' => $product->reference, // A saját cikkszámunkat küldjük tovább
+        'reference' => $myReference, // ITT A LÉNYEG! A frissített $product->reference megy
         'price' => $priceToSend,
         'token' => $token
     ];
 
-    // --- 6. KÜLDÉSI LOGIKA SZÉTVÁLASZTÁSA ---
+    // --- 6. KÜLDÉS ---
 
     if ($mode === 'SENDER') {
-        // A Beszállító sok boltba küld egyszerre (Target URLs lista)
         $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
         foreach ($targets as $url) {
-            $url = trim($url);
-            if (!empty($url)) {
-                $this->sendWebhook($url, $payload);
-            }
+            if (!empty(trim($url))) $this->sendWebhook(trim($url), $payload);
         }
     } 
     elseif ($mode === 'CHAIN') {
-        // A Lánc (Electrob.ro) csak a következő boltnak küld (Next Shop URL)
         $nextUrl = Configuration::get('PSP_NEXT_SHOP_URL');
         if (!empty($nextUrl)) {
             $this->sendWebhook($nextUrl, $payload);
         } else {
-            self::log($product->reference, "CHAIN HIBA: Nincs megadva a 'Következő Shop URL'!", 'error');
+            self::log($myReference, "CHAIN HIBA: Üres URL", 'error');
         }
     }
 }
