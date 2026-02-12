@@ -154,60 +154,58 @@ class PriceSyncPro extends Module
 
     protected function processBulkSyncBatch()
 {
+    // Adatok lekérése az URL-ből és az Admin felületről
     $offset = (int)Tools::getValue('offset', 0);
     $limit = 50; 
     $mode = Configuration::get('PSP_MODE');
+    
+    // Itt hívjuk be azokat az értékeket, amiket az Admin felületen beállítottál!
+    $exchangeRate = (float)Configuration::get('PSP_EXCHANGE_RATE', 85); 
+    $token = Configuration::get('PSP_TOKEN');
 
-    // 1. Csak azokat a termékeket kérjük le, amik aktívak
+    // 1. Termékek lekérése
     $sql = 'SELECT id_product FROM ' . _DB_PREFIX_ . 'product WHERE active = 1 LIMIT ' . (int)$offset . ', ' . (int)$limit;
     $products = Db::getInstance()->executeS($sql);
 
-    // --- JAVÍTÁS: Ha üres a lista, akkor is JSON-t kell adni offset-tel! ---
+    // Ha nincs több termék, szabályos JSON-nal zárunk
     if (empty($products)) {
         ob_clean();
         header('Content-Type: application/json');
-        die(json_encode([
-            'finished' => true, 
-            'count' => 0, 
-            'offset' => $offset
-        ]));
+        die(json_encode(['finished' => true, 'count' => 0, 'offset' => $offset]));
     }
 
     $count = 0;
     foreach ($products as $p) {
         $product = new Product((int)$p['id_product']);
         
-        // 2. ÁR LEKÉRÉSE (Akciós ár támogatása)
-        $price = Product::getPriceStatic(
-            (int)$product->id, 
-            true,  // Bruttó
-            null, 
-            6, 
-            null, 
-            false, 
-            true   // IGEN, az akciós árat vegye!
-        );
+        // 2. ÁR LEKÉRÉSE (Pontosan úgy, ahogy a manuális mentésnél - AKCIÓS ÁRRAL)
+        $price = Product::getPriceStatic((int)$product->id, true, null, 6, null, false, true);
 
-        // 3. CIKKSZÁM ÉS ÁTVÁLTÁS LOGIKA
+        // 3. LOGIKA A MÓD ALAPJÁN
         if ($mode === 'SENDER') {
+            // BESZÁLLÍTÓ: Csak a saját cikkszámot küldi, szorzás nélkül
             if (empty($product->reference)) continue;
             $refToSend = $product->reference;
             $priceToSend = $price;
         } elseif ($mode === 'CHAIN') {
+            // ELECTROB.RO: Kell a beszállítói kód, de a sajátját küldi tovább HUF-ban
             if (empty($product->supplier_reference)) continue;
+            
             $refToSend = $product->reference; 
-            $priceToSend = $price * 85;
+            // Itt használja az Adminban beállított árfolyamot (pl. 85)
+            $priceToSend = $price * $exchangeRate; 
         } else {
             continue;
         }
 
+        // 4. CSOMAG ÖSSZEÁLLÍTÁSA
         $payload = [
             'reference' => $refToSend,
             'price' => $priceToSend,
-            'token' => Configuration::get('PSP_TOKEN')
+            'token' => $token
         ];
 
-        // 5. KÜLDÉS
+        // 5. KÜLDÉS (Webhook hívása)
         if ($mode === 'SENDER') {
             $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
             foreach ($targets as $url) {
@@ -221,17 +219,17 @@ class PriceSyncPro extends Module
         $count++;
     }
 
-    // --- JAVÍTOTT BEFEJEZÉS ---
+    // --- BEFEJEZÉS: JSON VÁLASZ A BÖNGÉSZŐNEK ---
     if (ob_get_length()) ob_clean(); 
     header('Content-Type: application/json');
 
-    // Akkor van vége, ha kevesebb terméket dolgoztunk fel, mint a limit
+    // Akkor van vége, ha kevesebb terméket vittünk át, mint a limit (50)
     $isFinished = ($count < $limit);
 
     die(json_encode([
         'finished' => $isFinished, 
         'count' => $count, 
-        'offset' => $offset + $limit // A limitet adjuk hozzá, hogy a következő 50-est kérje
+        'offset' => $offset + $limit 
     ]));
 }
 
