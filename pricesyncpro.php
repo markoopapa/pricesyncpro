@@ -154,81 +154,97 @@ class PriceSyncPro extends Module
 
     protected function processBulkSyncBatch()
 {
-    // Adatok lekérése az URL-ből és az Admin felületről
+    // 1. STABILITÁS NÖVELÉSE (Hogy ne szakadjon meg a folyamat)
+    @ini_set('max_execution_time', 0); // Időkorlát kikapcsolása
+    @ini_set('memory_limit', '512M');  // Több memória
+    
     $offset = (int)Tools::getValue('offset', 0);
-    $limit = 50; 
+    $limit = 10; // FONTOS: Csak 10 termék egyszerre, hogy biztosan végigfusson!
     $mode = Configuration::get('PSP_MODE');
     
-    // Itt hívjuk be azokat az értékeket, amiket az Admin felületen beállítottál!
-    $exchangeRate = (float)Configuration::get('PSP_EXCHANGE_RATE', 85); 
-    $token = Configuration::get('PSP_TOKEN');
+    // Admin beállítások betöltése
+    $exchangeRate = (float)Configuration::get('PSP_EXCHANGE_RATE');
+    if ($exchangeRate <= 0) $exchangeRate = 85; // Biztonsági alapértelmezett, ha nincs beállítva
 
-    // 1. Termékek lekérése
+    // 2. TERMÉKEK LEKÉRÉSE
     $sql = 'SELECT id_product FROM ' . _DB_PREFIX_ . 'product WHERE active = 1 LIMIT ' . (int)$offset . ', ' . (int)$limit;
     $products = Db::getInstance()->executeS($sql);
 
-    // Ha nincs több termék, szabályos JSON-nal zárunk
+    // Ha nincs több termék, szabályosan lezárjuk
     if (empty($products)) {
-        ob_clean();
+        if (ob_get_length()) ob_end_clean(); // Puffer törlése
         header('Content-Type: application/json');
-        die(json_encode(['finished' => true, 'count' => 0, 'offset' => $offset]));
+        die(json_encode([
+            'finished' => true, 
+            'count' => 0, 
+            'offset' => $offset
+        ]));
     }
 
     $count = 0;
     foreach ($products as $p) {
         $product = new Product((int)$p['id_product']);
         
-        // 2. ÁR LEKÉRÉSE (Pontosan úgy, ahogy a manuális mentésnél - AKCIÓS ÁRRAL)
+        // 3. PONTOS ÁR LEKÉRÉSE (Ugyanúgy, mint a manuális mentésnél)
+        // A 'true' paraméterek biztosítják, hogy az AKCIÓS árat kapjuk meg
         $price = Product::getPriceStatic((int)$product->id, true, null, 6, null, false, true);
 
-        // 3. LOGIKA A MÓD ALAPJÁN
-        if ($mode === 'SENDER') {
-            // BESZÁLLÍTÓ: Csak a saját cikkszámot küldi, szorzás nélkül
-            if (empty($product->reference)) continue;
-            $refToSend = $product->reference;
-            $priceToSend = $price;
-        } elseif ($mode === 'CHAIN') {
-            // ELECTROB.RO: Kell a beszállítói kód, de a sajátját küldi tovább HUF-ban
-            if (empty($product->supplier_reference)) continue;
-            
-            $refToSend = $product->reference; 
-            // Itt használja az Adminban beállított árfolyamot (pl. 85)
-            $priceToSend = $price * $exchangeRate; 
-        } else {
-            continue;
-        }
+        // 4. KÜLDÉSI LOGIKA
+        $priceToSend = 0;
+        $refToSend = '';
+        $shouldSend = false;
 
-        // 4. CSOMAG ÖSSZEÁLLÍTÁSA
-        $payload = [
-            'reference' => $refToSend,
-            'price' => $priceToSend,
-            'token' => $token
-        ];
-
-        // 5. KÜLDÉS (Webhook hívása)
         if ($mode === 'SENDER') {
-            $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
-            foreach ($targets as $url) {
-                if (!empty(trim($url))) $this->sendWebhook(trim($url), $payload);
+            // BESZÁLLÍTÓ: Saját cikkszám, eredeti ár
+            if (!empty($product->reference)) {
+                $refToSend = $product->reference;
+                $priceToSend = $price;
+                $shouldSend = true;
             }
         } elseif ($mode === 'CHAIN') {
-            $nextUrl = Configuration::get('PSP_NEXT_SHOP_URL');
-            if (!empty($nextUrl)) $this->sendWebhook($nextUrl, $payload);
+            // ELECTROB.RO: Beszállítói azonosítás, de saját cikkszám küldése + Szorzás
+            if (!empty($product->supplier_reference)) {
+                $refToSend = $product->reference; 
+                $priceToSend = $price * $exchangeRate; // Itt szorozzuk be!
+                $shouldSend = true;
+            }
         }
 
-        $count++;
+        // 5. KÜLDÉS VÉGREHAJTÁSA
+        if ($shouldSend) {
+            $payload = [
+                'reference' => $refToSend,
+                'price' => $priceToSend,
+                'token' => Configuration::get('PSP_TOKEN')
+            ];
+
+            // Naplózás, hogy lássuk, mi történik
+            self::log($refToSend, "SYNC: Küldés folyamatban... Ár: $priceToSend", 'info');
+
+            if ($mode === 'SENDER') {
+                $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
+                foreach ($targets as $url) {
+                    if (!empty(trim($url))) $this->sendWebhook(trim($url), $payload);
+                }
+            } elseif ($mode === 'CHAIN') {
+                $nextUrl = Configuration::get('PSP_NEXT_SHOP_URL');
+                if (!empty($nextUrl)) $this->sendWebhook($nextUrl, $payload);
+            }
+            $count++;
+        }
     }
 
-    // --- BEFEJEZÉS: JSON VÁLASZ A BÖNGÉSZŐNEK ---
-    if (ob_get_length()) ob_clean(); 
+    // --- 6. KRITIKUS RÉSZ: A VÁLASZ LEZÁRÁSA ---
+    // Ez javítja az "undefined" hibát. Törlünk mindent, ami nem JSON.
+    if (ob_get_length()) ob_end_clean();
     header('Content-Type: application/json');
 
-    // Akkor van vége, ha kevesebb terméket vittünk át, mint a limit (50)
-    $isFinished = ($count < $limit);
+    $isFinished = (count($products) < $limit);
 
     die(json_encode([
         'finished' => $isFinished, 
         'count' => $count, 
+        // Mindig a limitet adjuk hozzá, így stabilan lépked 10-esével
         'offset' => $offset + $limit 
     ]));
 }
