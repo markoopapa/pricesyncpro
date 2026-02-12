@@ -43,54 +43,81 @@ class PriceSyncProApiModuleFrontController extends ModuleFrontController
     }
 
     protected function processSync($data)
-{
-    $ref = $data['reference']; 
-    $incomingGross = (float)$data['price'];
+    {
+        // 1. ADATOK ÁTVÉTELE
+        // Ha a te kódodban máshogy hívják a változókat, itt írd át!
+        $ref = $data['reference']; 
+        $incomingGross = (float)$data['price'];
 
-    // 1. KERESÉS: supplier_reference VAGY reference alapján
-    $sql = 'SELECT id_product, reference FROM ' . _DB_PREFIX_ . 'product 
-            WHERE supplier_reference = "' . pSQL($ref) . '" 
-            OR reference = "' . pSQL($ref) . '"';
+        // --- INNEN KEZDŐDIK AZ ÚJ LOGIKA ---
 
-    $row = Db::getInstance()->getRow($sql);
-    if (!$row) return ['error' => 'Product not found'];
+        // 2. KERESÉS: Beszállítói cikkszám VAGY Saját cikkszám alapján
+        // Ez a rész nagyon fontos, ez találja meg a terméket akkor is, ha a beszállító küldi!
+        $sql = 'SELECT id_product, reference FROM ' . _DB_PREFIX_ . 'product 
+                WHERE supplier_reference = "' . pSQL($ref) . '" 
+                OR reference = "' . pSQL($ref) . '"';
 
-    $id_product = (int)$row['id_product'];
-    $internalRef = $row['reference'];
-
-    // 2. TILTÓLISTA (a saját belső cikkszám alapján)
-    if ($this->isBlacklisted($internalRef)) {
-        PriceSyncPro::log($internalRef, "INFO: Tiltólistán van, frissítés blokkolva.", 'warning');
-        return ['status' => 'skipped'];
-    }
-
-    $product = new Product($id_product);
-    $multiplier = (float)Configuration::get('PSP_MULTIPLIER', 1);
-    $targetGross = $incomingGross * $multiplier;
-
-    // 3. KEREKÍTÉS (Automatikusan felismeri a bolt pénznemét)
-    $currency = Context::getContext()->currency;
-    if ($currency->iso_code === 'HUF') {
-        $targetGross = round($targetGross / 5) * 5;
-    } else {
-        if ($targetGross < 1) $targetGross = round($targetGross, 1);
-        elseif ($targetGross < 2) $targetGross = round($targetGross * 2) / 2;
-        else $targetGross = round($targetGross);
-    }
-
-    // 4. MENTÉS
-    $taxRate = (float)$product->getTaxesRate();
-    $newNettoPrice = (float)Tools::ps_round($targetGross / (1 + ($taxRate / 100)), 6);
-
-    if (abs((float)$product->price - $newNettoPrice) > 0.01) {
-        $product->price = $newNettoPrice;
-        if ($product->update()) {
-            PriceSyncPro::log($internalRef, "SIKER: Ár frissítve. Bruttó: $targetGross", 'success');
-            return ['status' => 'success'];
+        $row = Db::getInstance()->getRow($sql);
+        
+        if (!$row) {
+            // HIBA NAPLÓZÁSA (Hogy lásd a magyar oldalon is, ha baj van)
+            PriceSyncPro::log($ref, "API HIBA: Termék nem található (se saját, se beszállítói kód alapján)!", 'error');
+            return ['error' => 'Product not found'];
         }
+
+        $id_product = (int)$row['id_product'];
+        $internalRef = $row['reference']; // Megszerezzük a belső cikkszámot
+
+        // 3. TILTÓLISTA ELLENŐRZÉS (A belső cikkszám alapján)
+        if ($this->isBlacklisted($internalRef)) {
+            PriceSyncPro::log($internalRef, "INFO: Tiltólistán van, frissítés blokkolva.", 'warning');
+            return ['status' => 'skipped'];
+        }
+
+        // 4. TERMÉK BETÖLTÉSE
+        $product = new Product($id_product);
+        
+        // Szorzó alkalmazása (Admin beállítás alapján)
+        $multiplier = (float)Configuration::get('PSP_MULTIPLIER', 1);
+        $targetGross = $incomingGross * $multiplier;
+
+        // 5. KEREKÍTÉS (HUF vs RON felismerése)
+        $currency = Context::getContext()->currency;
+        if ($currency->iso_code === 'HUF') {
+            // Magyar: 5-re kerekítés
+            $targetGross = round($targetGross / 5) * 5;
+        } else {
+            // Román: Lépcsőzetes (1 tizedes, 0.5-ös lépcső, vagy egész)
+            if ($targetGross < 1) {
+                $targetGross = round($targetGross, 1);
+            } elseif ($targetGross >= 1 && $targetGross < 2) {
+                $targetGross = round($targetGross * 2) / 2;
+            } else {
+                $targetGross = round($targetGross);
+            }
+        }
+
+        // 6. NETTÓSÍTÁS ÉS MENTÉS
+        $taxRate = (float)$product->getTaxesRate();
+        // A PrestaShop 6 tizedesjegyet használ a nettó árnál
+        $newNettoPrice = (float)Tools::ps_round($targetGross / (1 + ($taxRate / 100)), 6);
+
+        // Csak akkor mentünk, ha változott az ár (kíméljük az adatbázist)
+        if (abs((float)$product->price - $newNettoPrice) > 0.01) {
+            $product->price = $newNettoPrice;
+            
+            if ($product->update()) {
+                // SIKER NAPLÓZÁSA
+                PriceSyncPro::log($internalRef, "SIKER: Ár frissítve. Új bruttó: $targetGross ($currency->iso_code)", 'success');
+                return ['status' => 'success'];
+            } else {
+                PriceSyncPro::log($internalRef, "HIBA: A termék mentése nem sikerült.", 'error');
+                return ['error' => 'Update failed'];
+            }
+        }
+
+        return ['status' => 'no_change'];
     }
-    return ['status' => 'no_change'];
-}
 	
 	protected function isBlacklisted($ref)
     {
