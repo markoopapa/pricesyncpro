@@ -25,7 +25,7 @@ class PriceSyncPro extends Module
         $this->bootstrap = true;
         parent::__construct();
         $this->displayName = $this->trans('Price Sync Pro', [], 'Modules.Pricesyncpro.Admin');
-        $this->description = $this->trans('Árszinkronizáló Naplózással.', [], 'Modules.Pricesyncpro.Admin');
+        $this->description = $this->trans('API-alapú megoldás ár valós idejű szinkronizálására', [], 'Modules.Pricesyncpro.Admin');
         $this->ps_versions_compliancy = ['min' => '1.7.0.0', 'max' => _PS_VERSION_];
     }
 
