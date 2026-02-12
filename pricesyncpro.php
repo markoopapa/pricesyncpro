@@ -83,7 +83,7 @@ class PriceSyncPro extends Module
     public function getContent(): string
     {
         // AJAX Bulk Sync kezelés (Maradhat a régi, vagy amit az előbb küldtem)
-        if (Tools::isSubmit('ajax_bulk_sync')) { $this->processBulkSyncBatch(); exit; }
+        if (Tools::isSubmit('ajax_bulk_sync')) { $this->(); exit; }
 
         $output = '';
 
@@ -268,23 +268,38 @@ class PriceSyncPro extends Module
 
     // Teljes termékszám lekérése a stabil befejezéshez
     $total = (int)Db::getInstance()->getValue(
-        'SELECT COUNT(*) FROM ' . _DB_PREFIX_ . 'product WHERE active = 1'
-    );
+    'SELECT COUNT(*) FROM ' . _DB_PREFIX_ . 'product WHERE active = 1'
+);
 
-    $nextOffset = $offset + $limit;
-    $isFinished = ($nextOffset >= $total);
+$nextOffset = $offset + $limit;
+$isFinished = ($nextOffset >= $total);
 
-    if (ob_get_length()) ob_end_clean();
-    header('Content-Type: application/json');
+// LOOP DETEKTOR
+if ($nextOffset <= $offset) {
+    error_log("⚠ LOOP WARNING: NEXT OFFSET NOT INCREASING!");
+}
 
-    echo json_encode([
-        'finished' => $isFinished,
-        'offset'   => $nextOffset,
-        'batch'    => $page,
-        'count'    => $countSent
-    ]);
+error_log(
+    "=== BULK SYNC DEBUG === | " .
+    "OFFSET_IN: ".$offset .
+    " | NEXT_OFFSET: ".$nextOffset .
+    " | TOTAL: ".$total .
+    " | PRODUCTS_FOUND: ".count($products) .
+    " | SENT: ".$countSent .
+    " | FINISHED: ".($isFinished ? 'YES' : 'NO')
+);
 
-    die();
+if (ob_get_length()) ob_end_clean();
+header('Content-Type: application/json');
+
+echo json_encode([
+    'finished' => $isFinished,
+    'offset'   => $nextOffset,
+    'batch'    => $page,
+    'count'    => $countSent
+]);
+
+die();
 }
 
     /**
