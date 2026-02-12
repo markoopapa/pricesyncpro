@@ -224,7 +224,6 @@ class PriceSyncPro extends Module
         if ($is_processing) return;
         $is_processing = true;
 
-        // 1. TERMÉK ID MEGSZERZÉSE
         $id_product = 0;
         if (isset($params['id_product'])) {
             $id_product = (int)$params['id_product'];
@@ -239,28 +238,28 @@ class PriceSyncPro extends Module
         $mode = Configuration::get('PSP_MODE');
         if ($mode === 'OFF' || $mode === 'RECEIVER') return;
 
-        // 2. TERMÉK ADATAINAK BETÖLTÉSE
         $product = new Product($id_product);
 
-        // 3. KAPUŐR (A Te logikád alapján)
+        // --- KAPUŐR ÉS CIKKSZÁM MEGHATÁROZÁSA ---
         if ($mode === 'SENDER') {
-            // BESZÁLLÍTÓ OLDALÁN: Csak a Reference (Cikkszám) a lényeg!
-            if (empty($product->reference)) {
-                self::log($product->id, "STOP: Nincs Cikkszám (Reference)!", 'warning');
-                return;
-            }
+            if (empty($product->reference)) return;
+            // A beszállító a saját cikkszámát küldi
             $refToSend = $product->reference;
         } else {
-            // ELECTROB.RO (CHAIN) OLDALÁN: A Beszállító Cikkszáma (Supplier Reference) a lényeg!
-            if (empty($product->supplier_reference)) {
-                self::log($product->reference, "STOP: Nincs Beszállítói cikkszám (supplier_reference)!", 'warning');
-                return; 
+            // ELECTROB.RO (CHAIN):
+            if (empty($product->supplier_reference)) return; 
+            
+            // FONTOS: Az electrob.ro a SAJÁT reference kódját küldje tovább, 
+            // ne a beszállítóét, hogy az elektrob.hu felismerje!
+            $refToSend = $product->reference;
+            
+            // Ha véletlenül üres a saját cikkszám, csak akkor küldjük a beszállítóit
+            if (empty($refToSend)) {
+                $refToSend = $product->supplier_reference;
             }
-            // Itt a supplier_reference alapján azonosítunk vissza a láncban
-            $refToSend = $product->supplier_reference;
         }
 
-        // 4. ÁR LEKÉRÉSE (Normál vagy Akciós automatikusan)
+        // ÁR LEKÉRÉSE
         $price = $product->price; 
         try {
             $price = Product::getPriceStatic((int)$product->id, true, null, 6, null, false, true);
@@ -268,11 +267,11 @@ class PriceSyncPro extends Module
             $price = $product->price; 
         }
 
-        // 5. ÁTVÁLTÁS ÉS PAYLOAD
+        // ÁTVÁLTÁS
         $priceToSend = $price;
         if ($mode === 'CHAIN') {
-            $priceToSend = $price * 85; // RON -> HUF váltás az electrob.ro-n
-            self::log($refToSend, "ÁTVÁLTÁS: $price RON * 85 = $priceToSend HUF", 'info');
+            $priceToSend = $price * 85;
+            self::log($refToSend, "LÁNC KÜLDÉS: $price RON * 85 = $priceToSend HUF (Ref: $refToSend)", 'info');
         }
 
         $payload = [
@@ -280,9 +279,6 @@ class PriceSyncPro extends Module
             'price' => $priceToSend,
             'token' => Configuration::get('PSP_TOKEN')
         ];
-
-        // 6. KÜLDÉS
-        self::log($refToSend, "KÜLDÉS INDÍTÁSA... Ár: $priceToSend", 'info');
 
         if ($mode === 'SENDER') {
             $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
