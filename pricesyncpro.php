@@ -218,84 +218,72 @@ class PriceSyncPro extends Module
     }
 
     protected function processHook($params)
-    {
-        
-        static $is_processing = false;
-        if ($is_processing) return;
-        $is_processing = true;
-        
-        $id_product = isset($params['id_product']) ? (int)$params['id_product'] : (isset($params['product']->id) ? (int)$params['product']->id : 0);
-        if ($id_product && isset(self::$already_sent[$id_product])) return;
-        self::$already_sent[$id_product] = true;
-        
-        $mode = Configuration::get('PSP_MODE');
+{
+    static $is_processing = false;
+    if ($is_processing) return;
+    $is_processing = true;
+    
+    // 1. Termék azonosítása
+    $id_product = isset($params['id_product']) ? (int)$params['id_product'] : (isset($params['product']->id) ? (int)$params['product']->id : 0);
+    if ($id_product && isset(self::$already_sent[$id_product])) return;
+    self::$already_sent[$id_product] = true;
+    
+    $mode = Configuration::get('PSP_MODE');
 
-        // 1. Ha KIKAPCSOLT vagy csak FOGADÓ (Receiver), akkor nem csinálunk semmit
-        if ($mode === 'OFF' || $mode === 'RECEIVER') {
-            return;
-        }
-
-        // Termék betöltése
-        if (!isset($params['product'])) {
-             if (isset($params['id_product'])) {
-                $product = new Product((int)$params['id_product']);
-            } else {
-                return;
-            }
-        } else {
-            $product = $params['product'];
-        }
-
-        // Aktuális Bruttó (Akciós) ár lekérése
-        $price = Product::getPriceStatic($product->id, true, null, 6, null, false, true);
-        $token = Configuration::get('PSP_TOKEN');
-
-        // --- A. HA BESZÁLLÍTÓ VAGYOK (SENDER) ---
-        if ($mode === 'SENDER') {
-            $payload = [
-                'reference' => $product->reference,
-                'price' => $price, // Nyers ár
-                'token' => $token
-            ];
-
-            // Küldés a listának (Minmag + Electrob)
-            $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
-            foreach ($targets as $url) {
-                $url = trim($url);
-                if (!empty($url)) {
-                    $this->sendWebhook($url, $payload);
-                }
-            }
-        }
-
-        // --- B. HA KÖZTES SHOP VAGYOK (CHAIN - Electrob.ro) ---
-        elseif ($mode === 'CHAIN') {
-            $chainMultiplier = (float)Configuration::get('PSP_CHAIN_MULTIPLIER');
-            if ($chainMultiplier <= 0) $chainMultiplier = 1;
-
-            $priceToSend = $price * $chainMultiplier;
-            
-            // LOG: Tudjuk meg, hogy a hook egyáltalán eljutott-e idáig
-            self::log($product->reference, "CHAIN: Folyamat indul. Számolt ár küldéshez: " . $priceToSend, 'info');
-
-            $payload = [
-                'reference' => $product->reference,
-                'price' => $priceToSend,
-                'token' => $token
-            ];
-
-            $nextUrl = Configuration::get('PSP_NEXT_SHOP_URL');
-
-            if (!empty($nextUrl)) {
-                // Megpróbáljuk a küldést
-                $this->sendWebhook($nextUrl, $payload);
-            } else {
-                // LOG: Ha elfelejtetted beírni a magyar shop URL-jét
-                self::log($product->reference, "CHAIN HIBA: Nincs megadva a 'Következő Shop URL'!", 'error');
-            }
-        }
+    // 2. Kilépés, ha nincs dolgunk
+    if ($mode === 'OFF' || $mode === 'RECEIVER') {
+        return;
     }
 
+    // 3. Termék betöltése
+    if (!isset($params['product'])) {
+        if ($id_product) {
+            $product = new Product($id_product);
+        } else {
+            return;
+        }
+    } else {
+        $product = $params['product'];
+    }
+
+    // 4. KAPUŐR: Csak beszállítói cikkszámmal rendelkező termék mehet tovább
+    if (empty($product->supplier_reference)) {
+        return; 
+    }
+
+    // 5. Adatok előkészítése (Az electrob.ro-n már a módosított bruttó árat kérjük le)
+    $priceToSend = $product->getPrice(true); 
+    $token = Configuration::get('PSP_TOKEN');
+
+    $payload = [
+        'reference' => $product->reference, // A saját cikkszámunkat küldjük tovább
+        'price' => $priceToSend,
+        'token' => $token
+    ];
+
+    // --- 6. KÜLDÉSI LOGIKA SZÉTVÁLASZTÁSA ---
+
+    if ($mode === 'SENDER') {
+        // A Beszállító sok boltba küld egyszerre (Target URLs lista)
+        $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
+        foreach ($targets as $url) {
+            $url = trim($url);
+            if (!empty($url)) {
+                $this->sendWebhook($url, $payload);
+            }
+        }
+    } 
+    elseif ($mode === 'CHAIN') {
+        // A Lánc (Electrob.ro) csak a következő boltnak küld (Next Shop URL)
+        $nextUrl = Configuration::get('PSP_NEXT_SHOP_URL');
+        if (!empty($nextUrl)) {
+            $this->sendWebhook($nextUrl, $payload);
+            // Itt töröltük a siker logot, hogy ne szemeteljen, csak a hibát hagyjuk meg
+        } else {
+            self::log($product->reference, "CHAIN HIBA: Nincs megadva a 'Következő Shop URL'!", 'error');
+        }
+    }
+}
     protected function sendWebhook($url, $data)
     {
         $ch = curl_init($url);
