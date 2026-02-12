@@ -154,107 +154,111 @@ class PriceSyncPro extends Module
 
     protected function processBulkSyncBatch()
 {
-    // --- 1. BEÁLLÍTÁSOK (Marad a 20-as limit, az stabil) ---
+    // --- 1. CONFIG & MATEK ---
     $limit = 20; 
-    $offset = (int)Tools::getValue('offset', 0);
+    $currentOffset = (int)Tools::getValue('offset', 0);
     $mode = Configuration::get('PSP_MODE');
-    
-    // Árfolyam
     $exchangeRate = (float)Configuration::get('PSP_EXCHANGE_RATE');
     if ($exchangeRate <= 0) $exchangeRate = 85; 
 
-    // --- 2. ADATBÁZIS LEKÉRÉS ---
-    $sql = 'SELECT id_product FROM ' . _DB_PREFIX_ . 'product WHERE active = 1 LIMIT ' . (int)$offset . ', ' . (int)$limit;
-    $products = Db::getInstance()->executeS($sql);
+    // --- 2. TOTAL SZÁMOLÁS (A STABILITÁS ALAPJA) ---
+    // Először megkérdezzük, mennyi aktív termék van összesen.
+    // Így pontosan tudjuk, hol a vége, nem csak tippelünk.
+    $totalProducts = (int)Db::getInstance()->getValue(
+        'SELECT COUNT(*) FROM ' . _DB_PREFIX_ . 'product WHERE active = 1'
+    );
 
-    // Kiszámoljuk a "Batch" számot (hanyadik körnél tartunk)
-    // Ha offset = 0 -> page = 1. Ha offset = 20 -> page = 2.
-    $page = floor($offset / $limit) + 1;
-
-    // Ha nincs több termék
-    if (empty($products)) {
+    // Ha véletlenül túlszaladtunk (pl. töröltek terméket közben), álljunk meg.
+    if ($currentOffset >= $totalProducts) {
         if (ob_get_length()) ob_end_clean();
         header('Content-Type: application/json');
-        // Minden lehetséges néven elküldjük, hogy vége
-        echo json_encode([
-            'finished' => true,
-            'count' => 0,
-            'offset' => $offset,
-            'page' => $page,
-            'p' => $page,
-            'index' => $page
-        ]);
+        echo json_encode(['finished' => true, 'offset' => $totalProducts, 'total' => $totalProducts]);
         die();
     }
 
-    // --- 3. OKOS LOGIKA (Ez a lényeg, ezt megtartjuk!) ---
+    // --- 3. ADATBÁZIS LEKÉRÉS ---
+    $sql = 'SELECT id_product FROM ' . _DB_PREFIX_ . 'product WHERE active = 1 LIMIT ' . (int)$currentOffset . ', ' . (int)$limit;
+    $products = Db::getInstance()->executeS($sql);
+
+    // --- 4. FELDOLGOZÁS ---
     $countSent = 0;
-    foreach ($products as $p) {
-        $product = new Product((int)$p['id_product']);
-        
-        // Akciós ár lekérése
-        $price = Product::getPriceStatic((int)$product->id, true, null, 6, null, false, true);
+    if (!empty($products)) {
+        foreach ($products as $p) {
+            $product = new Product((int)$p['id_product']);
+            
+            // Ár + Akció (Ez a te logikád, ez jó)
+            $price = Product::getPriceStatic((int)$product->id, true, null, 6, null, false, true);
 
-        $priceToSend = 0;
-        $refToSend = '';
-        $shouldSend = false;
-
-        if ($mode === 'SENDER') {
-            if (!empty($product->reference)) {
-                $refToSend = $product->reference;
-                $priceToSend = $price;
-                $shouldSend = true;
-            }
-        } elseif ($mode === 'CHAIN') {
-            if (!empty($product->supplier_reference)) {
-                $refToSend = $product->reference; 
-                $priceToSend = $price * $exchangeRate; 
-                $shouldSend = true;
-            }
-        }
-
-        if ($shouldSend) {
-            $payload = [
-                'reference' => $refToSend,
-                'price' => $priceToSend,
-                'token' => Configuration::get('PSP_TOKEN')
-            ];
+            $priceToSend = 0;
+            $refToSend = '';
+            $shouldSend = false;
 
             if ($mode === 'SENDER') {
-                $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
-                foreach ($targets as $url) {
-                    if (!empty(trim($url))) $this->sendWebhook(trim($url), $payload);
+                if (!empty($product->reference)) {
+                    $refToSend = $product->reference;
+                    $priceToSend = $price;
+                    $shouldSend = true;
                 }
             } elseif ($mode === 'CHAIN') {
-                $nextUrl = Configuration::get('PSP_NEXT_SHOP_URL');
-                if (!empty($nextUrl)) $this->sendWebhook($nextUrl, $payload);
+                if (!empty($product->supplier_reference)) {
+                    $refToSend = $product->reference; 
+                    $priceToSend = $price * $exchangeRate; 
+                    $shouldSend = true;
+                }
             }
-            $countSent++;
+
+            if ($shouldSend) {
+                $payload = [
+                    'reference' => $refToSend,
+                    'price' => $priceToSend,
+                    'token' => Configuration::get('PSP_TOKEN')
+                ];
+
+                if ($mode === 'SENDER') {
+                    $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
+                    foreach ($targets as $url) {
+                        if (!empty(trim($url))) $this->sendWebhook(trim($url), $payload);
+                    }
+                } elseif ($mode === 'CHAIN') {
+                    $nextUrl = Configuration::get('PSP_NEXT_SHOP_URL');
+                    if (!empty($nextUrl)) $this->sendWebhook($nextUrl, $payload);
+                }
+                $countSent++;
+            }
         }
     }
 
-    // --- 4. A "BUTA" VÁLASZ (Hogy a progress bar örüljön) ---
+    // --- 5. A JÖVŐ KISZÁMÍTÁSA (CRITICAL FIX) ---
+    
+    // Mindig hozzáadjuk a limitet, akkor is, ha kevesebbet találtunk.
+    // Ez akadályozza meg a végtelen ciklust.
+    $nextOffset = $currentOffset + $limit;
+
+    // A befejezés logikája most már a TOTAL-on alapul
+    $isFinished = ($nextOffset >= $totalProducts);
+
+    // Hanyadik körben vagyunk? (Hogy ne legyen 'undefined')
+    $batchNumber = floor($currentOffset / $limit) + 1;
+
+    // --- 6. VÁLASZ ---
     if (ob_get_length()) ob_end_clean();
     header('Content-Type: application/json');
 
-    $nextOffset = $offset + $limit;
-    $isFinished = (count($products) < $limit);
-
-    // Itt a titok: Visszaküldjük az adatot MINDEN formában,
-    // amit a PrestaShop modulok valaha használtak.
     $response = [
         'finished' => $isFinished,
+        'total' => $totalProducts,
         'count' => $countSent,
         
-        // Ez a standard
+        // A legfontosabb: A KÖVETKEZŐ OFFSETET KÜLDJÜK!
+        // Így a JS a köv. körben már innen indul.
         'offset' => $nextOffset,
+        'next_offset' => $nextOffset,
         
-        // Ezt keresheti a Batch # kiíráshoz:
-        'page' => $page,      // Batch #1, Batch #2...
-        'p' => $page,         // Rövidítve
-        'index' => $page,     // Indexként
-        'step' => $page,      // Lépésként
-        'batch_num' => $page  // Ha esetleg így hívják
+        // A megjelenítéshez (hogy ne legyen undefined)
+        'batch' => $batchNumber,
+        'page' => $batchNumber,
+        'step' => $batchNumber,
+        'index' => $batchNumber
     ];
 
     echo json_encode($response);
