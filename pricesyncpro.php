@@ -176,7 +176,7 @@ class PriceSyncPro extends Module
         foreach ($products as $row) {
             $product = new Product((int)$row['id_product']);
             $params = ['product' => $product];
-            $this->($params);
+            $this->processHook($params);
             
             $processed++;
         }
@@ -194,7 +194,7 @@ class PriceSyncPro extends Module
      */
     public function hookActionProductUpdate($params)
     {
-        $this->($params);
+        $this->processHook($params);
     }
     
     /**
@@ -208,7 +208,7 @@ class PriceSyncPro extends Module
         // de a legegyszerűbb, ha hagyjuk lefutni, a fogadó oldal úgyis csak akkor ment, ha változott az ár.
         
         if (isset($params['object']) && $params['object'] instanceof Product) {
-            $this->(['product' => $params['object']]);
+            $this->processHook(['product' => $params['object']]);
         }
     }
     
@@ -223,7 +223,7 @@ class PriceSyncPro extends Module
     if ($is_processing) return;
     $is_processing = true;
 
-    // 1. ID MEGSZERZÉSE (Ez a legbiztosabb pont)
+    // 1. ID MEGSZERZÉSE
     $id_product = 0;
     if (isset($params['id_product'])) {
         $id_product = (int)$params['id_product'];
@@ -233,46 +233,55 @@ class PriceSyncPro extends Module
 
     if (!$id_product) return;
 
-    // VÉDELEM: Ne fussunk le kétszer ugyanarra
     if (isset(self::$already_sent[$id_product])) return;
     self::$already_sent[$id_product] = true;
 
     $mode = Configuration::get('PSP_MODE');
     if ($mode === 'OFF' || $mode === 'RECEIVER') return;
 
-    // 2. ÚJRATÖLTÉS (A HIBA JAVÍTÁSA!)
-    // Nem bízunk a kapott paraméterben, betöltjük frissen az adatbázisból!
+    // 2. TERMÉK ÚJRATÖLTÉSE (Hogy biztosan meglegyenek az adatok)
     $product = new Product($id_product);
 
     // 3. KAPUŐR: Beszállítói cikkszám ellenőrzése
     if (empty($product->supplier_reference)) {
-        // Ha nincs beszállítói kód, nem csinálunk semmit
         return; 
     }
 
-    // 4. AZONOSÍTÓK ELLENŐRZÉSE (LOG)
-    // Most már biztosan a jó adatokat látjuk
-    $myReference = $product->reference;          // Ez a 67403 (Saját)
-    $supplierRef = $product->supplier_reference; // Ez a 03674 (Beszállító)
-
-    // Ha a saját cikkszám üres, akkor baj van, nem tudjuk mit küldjünk
-    if (empty($myReference)) {
-        self::log($supplierRef, "HIBA: A terméknek nincs saját cikkszáma (Reference mező üres)!", 'error');
-        return;
-    }
-
-    // 5. ÁR LEKÉRÉSE (Akciósan)
-    $priceToSend = Product::getPriceStatic(
+    // 4. ALAP ÁR LEKÉRÉSE (RON-ban)
+    // Ez hozza az akciós árat (pl. 54 RON)
+    $priceRON = Product::getPriceStatic(
         $id_product, true, null, 6, null, false, true, 1, false, null, null, null, $specific_price_output, true, true, null, true
     );
 
-    $token = Configuration::get('PSP_TOKEN');
+    // --- 5. A NAGY VÁLTOZTATÁS: RON -> HUF ÁTVÁLTÁS ---
+    
+    // Itt állítsd be a váltószámot! (pl. 85)
+    $exchangeRate = 85; 
 
-    // DEBUG LOG: Lássuk pontosan, mit küldünk!
-    self::log($myReference, "KÜLDÉS: Saját Ref: $myReference | Ár: $priceToSend", 'info');
+    // Ha Lánc módban vagyunk, megszorozzuk az árat, mielőtt elküldjük
+    if ($mode === 'CHAIN') {
+        $priceToSend = $priceRON * $exchangeRate;
+        self::log($product->reference, "ÁTVÁLTÁS: $priceRON RON * $exchangeRate = $priceToSend HUF", 'info');
+    } else {
+        // Ha csak sima küldők vagyunk (nem lánc), marad az eredeti ár
+        $priceToSend = $priceRON;
+    }
+
+    // ---------------------------------------------------
+
+    $token = Configuration::get('PSP_TOKEN');
+    
+    // Azonosítás: Azt küldjük, ami a Reference mezőben van
+    // Ha az electrob.ro-n ez "03674", akkor azt küldjük.
+    // Az elektrob.hu api.php-ja meg fogja találni a supplier_reference alapján a 67403-at.
+    $refToSend = $product->reference; 
+    
+    if (empty($refToSend)) {
+         $refToSend = $product->supplier_reference; // Ha üres a ref, küldjük a beszállítóit végszükség esetén
+    }
 
     $payload = [
-        'reference' => $myReference, // ITT A LÉNYEG! A frissített $product->reference megy
+        'reference' => $refToSend,
         'price' => $priceToSend,
         'token' => $token
     ];
@@ -290,7 +299,7 @@ class PriceSyncPro extends Module
         if (!empty($nextUrl)) {
             $this->sendWebhook($nextUrl, $payload);
         } else {
-            self::log($myReference, "CHAIN HIBA: Üres URL", 'error');
+            self::log($refToSend, "CHAIN HIBA: Üres URL", 'error');
         }
     }
 }
