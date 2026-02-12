@@ -154,35 +154,37 @@ class PriceSyncPro extends Module
 
     protected function processBulkSyncBatch()
 {
-    // --- BEÁLLÍTÁSOK ---
-    // Mivel azt mondtad, a 20-as régen ment, állítsuk vissza arra!
-    $limit = 20; 
-    
+    // --- 1. BEÁLLÍTÁSOK ---
+    $limit = 20; // 20-asával haladunk (stabil)
     $offset = (int)Tools::getValue('offset', 0);
     $mode = Configuration::get('PSP_MODE');
+    
     $exchangeRate = (float)Configuration::get('PSP_EXCHANGE_RATE');
     if ($exchangeRate <= 0) $exchangeRate = 85; 
 
-    // 1. LEKÉRJÜK A KÖVETKEZŐ ADAGOT (Mindig fix 20-at)
+    // --- 2. ADATBÁZIS LEKÉRDEZÉS ---
+    // Mindig a következő 20 darabot kérjük le
     $sql = 'SELECT id_product FROM ' . _DB_PREFIX_ . 'product WHERE active = 1 LIMIT ' . (int)$offset . ', ' . (int)$limit;
     $products = Db::getInstance()->executeS($sql);
 
-    // Ha üres a lista, végeztünk
+    // Ha üres a lista (nincs több termék), lezárjuk
     if (empty($products)) {
         if (ob_get_length()) ob_end_clean();
         header('Content-Type: application/json');
-        die(json_encode(['finished' => true, 'count' => 0, 'offset' => $offset]));
+        echo json_encode(['finished' => true, 'count' => 0, 'offset' => $offset]);
+        die(); // Itt megáll a futás
     }
 
-    $countSent = 0; // Csak azt számoljuk, amit tényleg elküldtünk
+    // --- 3. FELDOLGOZÁS ---
+    $countSent = 0;
 
     foreach ($products as $p) {
         $product = new Product((int)$p['id_product']);
         
-        // Ár lekérése (akciósan)
+        // Akciós ár lekérése
         $price = Product::getPriceStatic((int)$product->id, true, null, 6, null, false, true);
 
-        // KÜLDÉSI LOGIKA
+        // Küldendő adatok előkészítése
         $priceToSend = 0;
         $refToSend = '';
         $shouldSend = false;
@@ -201,6 +203,7 @@ class PriceSyncPro extends Module
             }
         }
 
+        // Küldés
         if ($shouldSend) {
             $payload = [
                 'reference' => $refToSend,
@@ -208,7 +211,6 @@ class PriceSyncPro extends Module
                 'token' => Configuration::get('PSP_TOKEN')
             ];
 
-            // Webhook küldés
             if ($mode === 'SENDER') {
                 $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
                 foreach ($targets as $url) {
@@ -222,22 +224,29 @@ class PriceSyncPro extends Module
         }
     }
 
-    // --- A JAVÍTÁS LÉNYEGE ---
+    // --- 4. VÁLASZ ÖSSZEÁLLÍTÁSA (Egyszerűsítve) ---
+    
+    // Takarítás (hogy tiszta legyen a válasz)
     if (ob_get_length()) ob_end_clean();
     header('Content-Type: application/json');
 
-    // HIBA OKA VOLT: Eddig a $countSent-et adtuk hozzá, ami kevesebb lehetett mint a limit.
-    // MOST: Mindig a $limit-et (20) adjuk hozzá! Így biztosan tovább lép a következő adagra.
+    // Kiszámoljuk a következő lépést
+    // FONTOS: Mindig a limitet (20) adjuk hozzá, akkor is, ha nem küldtünk el mindent!
     $newOffset = $offset + $limit;
     
-    // Akkor van vége, ha az adatbázis kevesebbet adott vissza, mint amennyit kértünk
+    // Akkor van vége, ha az adatbázis kevesebbet adott, mint 20
     $isFinished = (count($products) < $limit);
 
-    die(json_encode([
+    // Válasz objektum
+    $response = [
         'finished' => $isFinished, 
         'count' => $countSent, 
-        'offset' => $newOffset // Ez a kulcs! Így nem ragad be.
-    ]));
+        'offset' => $newOffset
+    ];
+
+    // Kiírás és leállítás (Nincs többé ')))' zárójel hiba)
+    echo json_encode($response);
+    die();
 }
 
     /**
