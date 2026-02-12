@@ -219,91 +219,105 @@ class PriceSyncPro extends Module
 
     protected function processHook($params)
 {
-    static $is_processing = false;
-    if ($is_processing) return;
-    $is_processing = true;
+    // HIBAKERESŐ MÓD: Ez megakadályozza, hogy a kód "némán" leálljon
+    try {
+        static $is_processing = false;
+        if ($is_processing) return;
+        $is_processing = true;
 
-    // 1. TERMÉK AZONOSÍTÁSA
-    $id_product = 0;
-    if (isset($params['id_product'])) {
-        $id_product = (int)$params['id_product'];
-    } elseif (isset($params['product']->id)) {
-        $id_product = (int)$params['product']->id;
-    }
-
-    if (!$id_product) return;
-    
-    // Végtelen ciklus elleni védelem
-    if (isset(self::$already_sent[$id_product])) return;
-    self::$already_sent[$id_product] = true;
-
-    $mode = Configuration::get('PSP_MODE');
-    if ($mode === 'OFF' || $mode === 'RECEIVER') return;
-
-    // 2. TERMÉK BETÖLTÉSE
-    $product = new Product($id_product);
-
-    // 3. KAPUŐR: Beszállítói cikkszám ellenőrzése
-    if (empty($product->supplier_reference)) {
-        return; 
-    }
-
-    // --- 4. ÁR LEKÉRÉSE (A BIZTONSÁGOS MÓDSZER) ---
-    // Ez a függvény automatikusan tudja:
-    // Ha van akció: visszaadja a csökkentett árat.
-    // Ha nincs akció: visszaadja a normál árat.
-    
-    $price = Product::getPriceStatic(
-        (int)$product->id, 
-        true,  // Bruttó (Adóval növelt ár)
-        null, 
-        6,     // Tizedesjegyek
-        null, 
-        false, 
-        true   // IGEN (use_reduc): Vonja le a kedvezményt, ha van!
-    );
-
-    // --- 5. ÁTVÁLTÁS (Csak az electrob.ro használja) ---
-    $exchangeRate = 85; 
-
-    if ($mode === 'CHAIN') {
-        // Ha electrob.ro (LÁNC): Szorzunk 85-tel
-        $priceToSend = $price * $exchangeRate;
-        self::log($product->reference, "ÁTVÁLTÁS: $price RON * $exchangeRate = $priceToSend HUF", 'info');
-    } else {
-        // Ha Beszállító (SENDER): Küldjük az eredetit
-        $priceToSend = $price;
-    }
-
-    $token = Configuration::get('PSP_TOKEN');
-    
-    // Cikkszám kiválasztása
-    $refToSend = $product->reference;
-    if (empty($refToSend)) {
-         $refToSend = $product->supplier_reference;
-    }
-
-    $payload = [
-        'reference' => $refToSend,
-        'price' => $priceToSend,
-        'token' => $token
-    ];
-
-    // --- 6. KÜLDÉS ---
-    // Logoljuk, hogy biztosan lássuk, elindul-e
-    self::log($refToSend, "KÜLDÉS INDÍTÁSA... Ár: $priceToSend", 'info');
-
-    if ($mode === 'SENDER') {
-        $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
-        foreach ($targets as $url) {
-            if (!empty(trim($url))) $this->sendWebhook(trim($url), $payload);
+        // 1. TERMÉK AZONOSÍTÁSA
+        $id_product = 0;
+        if (isset($params['id_product'])) {
+            $id_product = (int)$params['id_product'];
+        } elseif (isset($params['product']->id)) {
+            $id_product = (int)$params['product']->id;
         }
-    } 
-    elseif ($mode === 'CHAIN') {
-        $nextUrl = Configuration::get('PSP_NEXT_SHOP_URL');
-        if (!empty($nextUrl)) {
-            $this->sendWebhook($nextUrl, $payload);
+
+        if (!$id_product) return;
+        if (isset(self::$already_sent[$id_product])) return;
+        self::$already_sent[$id_product] = true;
+
+        $mode = Configuration::get('PSP_MODE');
+        if ($mode === 'OFF' || $mode === 'RECEIVER') return;
+
+        // 2. TERMÉK BETÖLTÉSE
+        $product = new Product($id_product);
+
+        // NAPLÓZÁS: Lássuk, hogy él-e a rendszer!
+        // Ha ezt látod a naplóban, akkor a Hook működik.
+        self::log($product->reference, "HOOK FUTÁS: Termék mentése érzékelve ($mode)", 'info');
+
+        // 3. KAPUŐR
+        if (empty($product->supplier_reference)) {
+            self::log($product->reference, "STOP: Nincs beszállítói cikkszám.", 'warning');
+            return; 
         }
+
+        // 4. ÁR LEKÉRÉSE (HIBABIZTOS MÓDBAN)
+        // Itt szokott elhasalni, ezért védjük le!
+        
+        // Alapértelmezett ár (ha a lekérés nem sikerülne)
+        $price = $product->price; 
+        
+        try {
+            $price = Product::getPriceStatic(
+                (int)$product->id, 
+                true,  // Bruttó
+                null, 
+                6, 
+                null, 
+                false, 
+                true   // IGEN, vonja le az akciót!
+            );
+        } catch (Exception $e) {
+            self::log($product->reference, "ÁR HIBA: Nem sikerült lekérni a pontos árat: " . $e->getMessage(), 'error');
+            // Ha hiba van, maradunk a sima árnál, de nem állunk le!
+            $price = $product->price; 
+        }
+
+        // 5. ÁTVÁLTÁS (Csak electrob.ro / CHAIN módban)
+        $exchangeRate = 85; 
+
+        if ($mode === 'CHAIN') {
+            $priceToSend = $price * $exchangeRate;
+            self::log($product->reference, "ÁTVÁLTÁS: $price RON * $exchangeRate = $priceToSend HUF", 'info');
+        } else {
+            // SENDER (Beszállító)
+            $priceToSend = $price;
+        }
+
+        $token = Configuration::get('PSP_TOKEN');
+        
+        $refToSend = $product->reference;
+        if (empty($refToSend)) {
+             $refToSend = $product->supplier_reference;
+        }
+
+        $payload = [
+            'reference' => $refToSend,
+            'price' => $priceToSend,
+            'token' => $token
+        ];
+
+        // 6. KÜLDÉS
+        self::log($refToSend, "KÜLDÉS INDÍTÁSA... Ár: $priceToSend", 'info');
+
+        if ($mode === 'SENDER') {
+            $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
+            foreach ($targets as $url) {
+                if (!empty(trim($url))) $this->sendWebhook(trim($url), $payload);
+            }
+        } 
+        elseif ($mode === 'CHAIN') {
+            $nextUrl = Configuration::get('PSP_NEXT_SHOP_URL');
+            if (!empty($nextUrl)) {
+                $this->sendWebhook($nextUrl, $payload);
+            }
+        }
+
+    } catch (Exception $mainError) {
+        // HA BÁRMI MÁS BAJ VAN, EZT FOGOD LÁTNI A NAPLÓBAN:
+        self::log('SYSTEM', "KRITIKUS HIBA A HOOK-BAN: " . $mainError->getMessage(), 'error');
     }
 }
     public function sendWebhook($url, $data)
