@@ -155,23 +155,29 @@ class PriceSyncPro extends Module
     protected function processBulkSyncBatch()
 {
     $offset = (int)Tools::getValue('offset', 0);
-    $limit = 50; // Egyszerre 50 terméket dolgozunk fel
+    $limit = 50; 
     $mode = Configuration::get('PSP_MODE');
 
     // 1. Csak azokat a termékeket kérjük le, amik aktívak
-    $sql = 'SELECT id_product FROM ' . _DB_PREFIX_ . 'product WHERE active = 1 LIMIT ' . $offset . ', ' . $limit;
+    $sql = 'SELECT id_product FROM ' . _DB_PREFIX_ . 'product WHERE active = 1 LIMIT ' . (int)$offset . ', ' . (int)$limit;
     $products = Db::getInstance()->executeS($sql);
 
+    // --- JAVÍTÁS: Ha üres a lista, akkor is JSON-t kell adni offset-tel! ---
     if (empty($products)) {
-        echo json_encode(['finished' => true, 'count' => 0]);
-        return;
+        ob_clean();
+        header('Content-Type: application/json');
+        die(json_encode([
+            'finished' => true, 
+            'count' => 0, 
+            'offset' => $offset
+        ]));
     }
 
     $count = 0;
     foreach ($products as $p) {
         $product = new Product((int)$p['id_product']);
         
-        // --- 2. ÁR LEKÉRÉSE (Akciós ár támogatása) ---
+        // 2. ÁR LEKÉRÉSE (Akciós ár támogatása)
         $price = Product::getPriceStatic(
             (int)$product->id, 
             true,  // Bruttó
@@ -182,23 +188,19 @@ class PriceSyncPro extends Module
             true   // IGEN, az akciós árat vegye!
         );
 
-        // --- 3. CIKKSZÁM ÉS ÁTVÁLTÁS LOGIKA ---
+        // 3. CIKKSZÁM ÉS ÁTVÁLTÁS LOGIKA
         if ($mode === 'SENDER') {
-            // BESZÁLLÍTÓ: A saját cikkszámát küldi
             if (empty($product->reference)) continue;
             $refToSend = $product->reference;
             $priceToSend = $price;
         } elseif ($mode === 'CHAIN') {
-            // ELECTROB.RO: Kell a beszállítói kód az azonosításhoz, de a sajátját küldi tovább
             if (empty($product->supplier_reference)) continue;
-            
-            $refToSend = $product->reference; // A magyar oldal ezt várja
-            $priceToSend = $price * 85;       // RON -> HUF váltás
+            $refToSend = $product->reference; 
+            $priceToSend = $price * 85;
         } else {
             continue;
         }
 
-        // 4. CSOMAG ÖSSZEÁLLÍTÁSA
         $payload = [
             'reference' => $refToSend,
             'price' => $priceToSend,
@@ -220,16 +222,16 @@ class PriceSyncPro extends Module
     }
 
     // --- JAVÍTOTT BEFEJEZÉS ---
-    ob_clean(); // Minden mást törlünk (szóközök, hibaüzenetek)
+    if (ob_get_length()) ob_clean(); 
     header('Content-Type: application/json');
 
-    // Ha kevesebb terméket találtunk, mint a limit (50), akkor végeztünk
+    // Akkor van vége, ha kevesebb terméket dolgoztunk fel, mint a limit
     $isFinished = ($count < $limit);
 
     die(json_encode([
         'finished' => $isFinished, 
         'count' => $count, 
-        'offset' => $offset + $count
+        'offset' => $offset + $limit // A limitet adjuk hozzá, hogy a következő 50-est kérje
     ]));
 }
 
