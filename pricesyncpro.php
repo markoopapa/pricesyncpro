@@ -296,30 +296,27 @@ class PriceSyncPro extends Module
         }
     }
 }
-    protected function sendWebhook($url, $data)
-    {
-        $ch = curl_init($url);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
-        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-        
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_error($ch);
-        curl_close($ch);
-        
-        if ($error) {
-            self::log($data['reference'], "CURL HIBA: " . $error, 'error');
-        } elseif ($httpCode !== 200) {
-            // CSAK AKKOR NAPLÓZUNK, HA NEM 200 (TEHÁT HIBA VAN)
-            self::log($data['reference'], "Szerver válasza (HTTP $httpCode): " . substr($response, 0, 100), 'error');
-        }
-        // Ha HTTP 200, akkor nem írunk semmit, így tiszta marad a napló.
+    public function sendWebhook($url, $data)
+{
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, array('Content-Type:application/json'));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    
+    // SSL védelem kikapcsolása - ha ezen múlt, mostantól át fog menni!
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlError = curl_error($ch);
+    curl_close($ch);
+
+    if ($httpCode !== 200) {
+        self::log($data['reference'], "KÜLDÉSI HIBA ($url) -> Kód: $httpCode | Hiba: $curlError", 'error');
     }
+}
 
     public function getBlacklist()
 {
