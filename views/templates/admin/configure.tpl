@@ -1,207 +1,191 @@
 <div class="bootstrap" id="pricesync-dashboard">
-    <div class="row">
-        <div class="col-lg-12">
-            <h2 class="page-title">
-                <i class="icon-refresh"></i> Price Sync Manager
-                <small class="text-muted">v1.0.0</small>
-            </h2>
-        </div>
-    </div>
-
-    <ul class="nav nav-tabs" role="tablist">
-        <li class="active"><a href="#dashboard" role="tab" data-toggle="tab"><i class="icon-dashboard"></i> DASHBOARD</a></li>
+    
+    <ul class="nav nav-tabs" role="tablist" style="margin-bottom: 20px;">
+        <li class="active"><a href="#dashboard" role="tab" data-toggle="tab"><i class="icon-dashboard"></i> DASHBOARD & SYNC</a></li>
         <li><a href="#config" role="tab" data-toggle="tab"><i class="icon-cogs"></i> KONFIGURÁCIÓ</a></li>
+        <li><a href="#logs" role="tab" data-toggle="tab"><i class="icon-list"></i> NAPLÓ</a></li>
     </ul>
 
     <div class="tab-content">
         
         <div class="tab-pane active" id="dashboard">
-            <div class="row">
-                <div class="col-md-5">
-                    <div class="panel">
-                        <div class="panel-heading"><i class="icon-signal"></i> Kapcsolat Státusz</div>
-                        
-                        <div class="status-card">
-                            <div class="status-info">
-                                <strong>Beszállító API (Ez a Shop)</strong>
-                                <span class="status-sub">Mód: {$psp_mode}</span>
-                            </div>
-                            <span class="badge badge-success">AKTÍV</span>
+            {if $psp_mode != 'OFF'}
+            <div class="panel" id="bulk-sync-panel">
+                <div class="panel-heading"><i class="icon-refresh"></i> Tömeges Szinkronizálás (Bulk Sync)</div>
+                <div class="panel-body">
+                    <div class="alert alert-info">
+                        A rendszer 20-asával halad. Várd meg, amíg a folyamat eléri a 100%-ot!
+                    </div>
+                    <div class="row">
+                        <div class="col-md-4" style="padding-top: 8px;">
+                            <strong>Összes aktív termék:</strong> <span id="total_products_count" class="badge">{$total_products}</span> db
                         </div>
-
-                        <div class="status-card">
-                            <div class="status-info">
-                                <strong>Shop 1 (RON)</strong>
-                                <span class="status-sub">Utolsó szinkron: {$last_sync_date}</span>
-                            </div>
-                            {if $psp_s1_url}<span class="badge badge-success">Sync Ready</span>{else}<span class="badge badge-default">Nincs beállítva</span>{/if}
-                        </div>
-
-                        <div class="status-card">
-                            <div class="status-info">
-                                <strong>Shop 2 (HUF)</strong>
-                                <span class="status-sub">Utolsó szinkron: {$last_sync_date}</span>
-                            </div>
-                            {if $psp_s2_url}<span class="badge badge-success">Sync Ready</span>{else}<span class="badge badge-default">Nincs beállítva</span>{/if}
+                        <div class="col-md-8 text-right">
+                            <button type="button" id="btn-start-bulk" class="btn btn-primary" onclick="startBulkSync()">
+                                <i class="icon-play"></i> TELJES SZINKRON INDÍTÁSA
+                            </button>
                         </div>
                     </div>
-                </div>
 
-                <div class="col-md-7">
-                    <div class="console-wrapper">
-                        <div class="console-header">
-                            <span class="dot red"></span>
-                            <span class="dot yellow"></span>
-                            <span class="dot green"></span>
-                            <span class="console-title">LIVE SYNC CONSOLE</span>
+                    <div id="sync-progress-wrapper" style="display:none; margin-top: 20px;">
+                        <div class="progress">
+                            <div class="progress-bar progress-bar-striped active" role="progressbar" id="sync-progress-bar" style="width: 0%">
+                                <span id="sync-percentage">0%</span>
+                            </div>
                         </div>
-                        <div class="console-body">
-                            <div class="log-line"><span class="time">[{$last_sync_date}]</span> <span class="cmd">-> Rendszer indítása...</span> <span class="res success">SIKER!</span></div>
-                            <div class="log-line"><span class="time">[{$last_sync_date}]</span> <span class="cmd">-> Shop 1 (RON) kapcsolat ellenőrzése...</span> <span class="res success">OK</span></div>
-                            <div class="log-line"><span class="time">[{$last_sync_date}]</span> <span class="cmd">-> Shop 2 (HUF) kapcsolat ellenőrzése...</span> <span class="res success">OK</span></div>
-                            <div class="log-line warning"><span class="time">[{$last_sync_date}]</span> [REAL-TIME] Várakozás árváltozásra...</div>
+                        <div class="text-center text-muted" id="sync-status-text">Indítás...</div>
+                        <div class="well" id="bulk-console" style="margin-top:10px; height: 150px; overflow-y: auto; background: #222; color: #0f0; font-family: monospace; font-size: 11px; padding: 5px;">
+                            <div>> Rendszer készen áll.</div>
                         </div>
                     </div>
                 </div>
             </div>
+            {else}
+            <div class="alert alert-warning">A modul jelenleg ki van kapcsolva. Állítsd be a Működési Módot a Konfiguráció fülön!</div>
+            {/if}
         </div>
 
         <div class="tab-pane" id="config">
-            <form action="{$action_url}" method="post">
-                
-                <div class="panel">
-                    <div class="panel-heading">Alapbeállítások</div>
-                    <div class="row">
-                        <div class="col-md-6">
-                            <div class="form-group">
-                                <label>Működési Mód</label>
-                                <select name="PSP_MODE" class="form-control">
-                                    <option value="OFF" {if $psp_mode=='OFF'}selected{/if}>Kikapcsolva</option>
-                                    <option value="SENDER" {if $psp_mode=='SENDER'}selected{/if}>SENDER (Beszállító oldal)</option>
-                                    <option value="RECEIVER" {if $psp_mode=='RECEIVER'}selected{/if}>RECEIVER (Fogadó oldal)</option>
-                                </select>
-                            </div>
-                        </div>
-                        <div class="col-md-6">
-                            <div class="form-group">
-                                <label>Titkos Token (API Kulcs)</label>
-                                <input type="text" name="PSP_TOKEN" value="{$psp_token}" class="form-control" placeholder="Generálj egy erős jelszót ide...">
-                            </div>
+            <div class="panel">
+                <div class="panel-heading"><i class="icon-cogs"></i> Beállítások</div>
+                <form action="{$action_url}" method="post">
+                    <div class="form-group">
+                        <label>Működési Mód</label>
+                        <select name="PSP_MODE" class="form-control" id="mode_selector">
+                            <option value="OFF" {if $psp_mode=='OFF'}selected{/if}>Kikapcsolva</option>
+                            <option value="SENDER" {if $psp_mode=='SENDER'}selected{/if}>BESZÁLLÍTÓ (Csak küld)</option>
+                            <option value="CHAIN" {if $psp_mode=='CHAIN'}selected{/if}>LÁNC / KÖZTES (Fogad és Továbbküld)</option>
+                            <option value="RECEIVER" {if $psp_mode=='RECEIVER'}selected{/if}>VÉGCÉL (Csak fogad)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>API Token (Közös jelszó)</label>
+                        <input type="text" name="PSP_TOKEN" value="{$psp_token}" class="form-control">
+                    </div>
+                    <hr>
+                    <div id="sender_settings" style="display:none;">
+                        <div class="form-group">
+                            <label>Cél URL-ek (Soronként egy)</label>
+                            <textarea name="PSP_TARGET_URLS" rows="3" class="form-control">{$psp_target_urls}</textarea>
                         </div>
                     </div>
-                </div>
-
-                <div class="row">
-                    <div class="col-md-6">
-                        <div class="panel panel-info">
-                            <div class="panel-heading"><i class="icon-random"></i> 1. Shop (RON)</div>
-                            <div class="panel-body">
-                                <p class="help-block">Ez a bolt 1.5x szorzóval dolgozik.</p>
-                                
-                                <div class="form-group">
-                                    <label>URL (Fogadó API)</label>
-                                    <input type="text" name="PSP_S1_URL" value="{$psp_s1_url}" class="form-control">
-                                </div>
-                                <div class="form-group">
-                                    <label>Ár Szorzó</label>
-                                    <input type="text" name="PSP_S1_MULTIPLIER" value="{$psp_s1_multiplier}" class="form-control">
-                                </div>
-                                
-                                <hr>
-                                <h4><i class="icon-ban"></i> Tiltólista (Shop 1)</h4>
-                                <div class="input-group">
-                                    <input type="text" id="bl_input_1" class="form-control" placeholder="Cikkszám...">
-                                    <span class="input-group-btn">
-                                        <button class="btn btn-danger" type="button" onclick="addBlacklist(1)">Tiltás</button>
-                                    </span>
-                                </div>
-                                <br>
-                                <table class="table table-black-header">
-                                    <thead><tr><th>Kép</th><th>Név</th><th>Ref</th><th></th></tr></thead>
-                                    <tbody>
-                                        {foreach from=$blacklist_s1 item=b}
-                                        <tr>
-                                            <td>{if $b.image_url}<img src="{$b.image_url}" width="30">{/if}</td>
-                                            <td>{$b.product_name}</td>
-                                            <td>{$b.reference}</td>
-                                            <td><a href="{$action_url}&deleteblacklist=1&id_blacklist={$b.id_blacklist}" class="btn btn-xs btn-default"><i class="icon-trash"></i></a></td>
-                                        </tr>
-                                        {foreachelse}
-                                        <tr><td colspan="4" class="text-center text-muted">Nincs tiltott termék.</td></tr>
-                                        {/foreach}
-                                    </tbody>
-                                </table>
-                            </div>
+                    <div id="incoming_settings" style="display:none;">
+                        <div class="form-group">
+                            <label>Termék Azonosítás</label>
+                            <select name="PSP_MATCH_BY" class="form-control">
+                                <option value="reference" {if $psp_match_by=='reference'}selected{/if}>Saját Cikkszám</option>
+                                <option value="supplier_reference" {if $psp_match_by=='supplier_reference'}selected{/if}>Beszállító Cikkszáma</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Bejövő Szorzó</label>
+                            <input type="text" name="PSP_MULTIPLIER" value="{$psp_multiplier}" class="form-control">
                         </div>
                     </div>
-
-                    <div class="col-md-6">
-                        <div class="panel panel-info">
-                            <div class="panel-heading"><i class="icon-random"></i> 2. Shop (HUF)</div>
-                            <div class="panel-body">
-                                <p class="help-block">Ez a bolt 85x szorzóval és kerekítéssel dolgozik.</p>
-
-                                <div class="form-group">
-                                    <label>URL (Fogadó API)</label>
-                                    <input type="text" name="PSP_S2_URL" value="{$psp_s2_url}" class="form-control">
-                                </div>
-                                <div class="form-group">
-                                    <label>Ár Szorzó</label>
-                                    <input type="text" name="PSP_S2_MULTIPLIER" value="{$psp_s2_multiplier}" class="form-control">
-                                </div>
-
-                                <hr>
-                                <h4><i class="icon-ban"></i> Tiltólista (Shop 2)</h4>
-                                <div class="input-group">
-                                    <input type="text" id="bl_input_2" class="form-control" placeholder="Cikkszám...">
-                                    <span class="input-group-btn">
-                                        <button class="btn btn-danger" type="button" onclick="addBlacklist(2)">Tiltás</button>
-                                    </span>
-                                </div>
-                                <br>
-                                <table class="table table-black-header">
-                                    <thead><tr><th>Kép</th><th>Név</th><th>Ref</th><th></th></tr></thead>
-                                    <tbody>
-                                        {foreach from=$blacklist_s2 item=b}
-                                        <tr>
-                                            <td>{if $b.image_url}<img src="{$b.image_url}" width="30">{/if}</td>
-                                            <td>{$b.product_name}</td>
-                                            <td>{$b.reference}</td>
-                                            <td><a href="{$action_url}&deleteblacklist=1&id_blacklist={$b.id_blacklist}" class="btn btn-xs btn-default"><i class="icon-trash"></i></a></td>
-                                        </tr>
-                                        {foreachelse}
-                                        <tr><td colspan="4" class="text-center text-muted">Nincs tiltott termék.</td></tr>
-                                        {/foreach}
-                                    </tbody>
-                                </table>
-                            </div>
+                    <div id="chain_settings" style="display:none;">
+                        <div class="form-group">
+                            <label>Következő Shop URL</label>
+                            <input type="text" name="PSP_NEXT_SHOP_URL" value="{$psp_next_shop_url}" class="form-control">
+                        </div>
+                        <div class="form-group">
+                            <label>Továbbküldési Szorzó (x85)</label>
+                            <input type="text" name="PSP_CHAIN_MULTIPLIER" value="{$psp_chain_multiplier}" class="form-control">
                         </div>
                     </div>
-                </div>
+                    <div class="panel-footer">
+                        <button type="submit" name="submitPriceSyncConfig" class="btn btn-default pull-right"><i class="process-icon-save"></i> MENTÉS</button>
+                    </div>
+                </form>
+            </div>
 
-                <div class="panel-footer">
-                    <button type="submit" name="submitPriceSyncConfig" class="btn btn-default pull-right"><i class="process-icon-save"></i> MENTÉS</button>
+            <div class="panel">
+                <h3><i class="icon-ban"></i> Tiltólista</h3>
+                <form action="{$action_url}" method="post" class="form-inline">
+                    <input type="text" name="blacklist_ref" class="form-control" placeholder="Cikkszám...">
+                    <button type="submit" name="submitBlacklistAdd" class="btn btn-danger">Tiltás</button>
+                </form>
+                <table class="table" style="margin-top:10px;">
+                    {foreach from=$blacklist item=b}
+                    <tr>
+                        <td>{if $b.image_url}<img src="{$b.image_url}" width="30">{/if}</td>
+                        <td>{$b.product_name} (Ref: {$b.reference})</td>
+                        <td class="text-right"><a href="{$action_url}&deleteblacklist=1&id_blacklist={$b.id_blacklist}" class="btn btn-xs btn-default"><i class="icon-trash"></i></a></td>
+                    </tr>
+                    {/foreach}
+                </table>
+            </div>
+        </div>
+
+        <div class="tab-pane" id="logs">
+            <div class="panel">
+                <div class="panel-heading">
+                    <i class="icon-list"></i> Utolsó 100 esemény
+                    <form action="{$action_url}" method="post" style="display:inline; float:right;">
+                        <button type="submit" name="clear_logs" class="btn btn-xs btn-default">Napló törlése</button>
+                    </form>
                 </div>
-            </form>
+                <table class="table">
+                    <thead><tr><th>Idő</th><th>Típus</th><th>Ref</th><th>Üzenet</th></tr></thead>
+                    <tbody>
+                        {foreach from=$logs item=log}
+                        <tr>
+                            <td><small>{$log.date_add}</small></td>
+                            <td><span class="label {if $log.type=='success'}label-success{elseif $log.type=='error'}label-danger{else}label-warning{/if}">{$log.type}</span></td>
+                            <td><strong>{$log.reference}</strong></td>
+                            <td>{$log.message}</td>
+                        </tr>
+                        {foreachelse}
+                        <tr><td colspan="4" class="text-center">Még nincs adat a naplóban.</td></tr>
+                        {/foreach}
+                    </tbody>
+                </table>
+            </div>
         </div>
     </div>
 </div>
 
-<form id="blacklist_form" action="{$action_url}" method="post" style="display:none;">
-    <input type="hidden" name="submitBlacklistAdd" value="1">
-    <input type="hidden" name="blacklist_ref" id="hidden_bl_ref">
-    <input type="hidden" name="blacklist_shop_target" id="hidden_bl_target">
-</form>
-
 <script>
-function addBlacklist(shopId) {
-    var ref = $('#bl_input_' + shopId).val();
-    if(ref) {
-        $('#hidden_bl_ref').val(ref);
-        $('#hidden_bl_target').val(shopId);
-        $('#blacklist_form').submit();
-    } else {
-        alert('Kérlek írj be egy cikkszámot!');
+$(document).ready(function(){
+    function updateUI() {
+        var mode = $('#mode_selector').val();
+        $('#sender_settings, #incoming_settings, #chain_settings').hide();
+        if (mode == 'SENDER') { $('#sender_settings').show(); }
+        else if (mode == 'CHAIN') { $('#incoming_settings, #chain_settings').show(); }
+        else if (mode == 'RECEIVER') { $('#incoming_settings').show(); }
     }
-}
+    $('#mode_selector').change(updateUI);
+    updateUI();
+
+    var totalProducts = {$total_products|intval};
+    var ajaxUrl = "{$ajax_url}";
+    var processedTotal = 0;
+
+    window.startBulkSync = function() {
+        if (!confirm('Indítod?')) return;
+        $('#btn-start-bulk').prop('disabled', true);
+        $('#sync-progress-wrapper').show();
+        processBatch(1);
+    };
+
+    function processBatch(page) {
+        $.ajax({
+            url: ajaxUrl, type: 'POST', data: { page: page }, dataType: 'json',
+            success: function(r) {
+                if (r.finished) { finish(); } else {
+                    processedTotal += r.processed_count;
+                    var p = Math.round((processedTotal / totalProducts) * 100);
+                    $('#sync-progress-bar').css('width', p + '%');
+                    $('#sync-percentage').text(p + '%');
+                    $('#bulk-console').prepend('<div>> Batch #' + page + ' kész.</div>');
+                    processBatch(r.next_page);
+                }
+            }
+        });
+    }
+    function finish() {
+        $('#sync-progress-bar').removeClass('active').addClass('progress-bar-success');
+        $('#btn-start-bulk').prop('disabled', false);
+        alert('Kész!');
+    }
+});
 </script>
