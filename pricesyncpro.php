@@ -152,42 +152,75 @@ class PriceSyncPro extends Module
         }
     }
 
-    /**
-     * ÚJ FÜGGVÉNY: A Tömeges Szinkronizálás Logikája (Batch)
-     */
     protected function processBulkSyncBatch()
-    {
-        header('Content-Type: application/json');
+{
+    $offset = (int)Tools::getValue('offset', 0);
+    $limit = 50; // Egyszerre 50 terméket dolgozunk fel
+    $mode = Configuration::get('PSP_MODE');
 
-        $page = (int)Tools::getValue('page', 1); // Hanyadik adagnál tartunk
-        $limit = 20; // Csak 20 termék egyszerre (Biztonságos!)
-        $offset = ($page - 1) * $limit;
+    // 1. Csak azokat a termékeket kérjük le, amik aktívak
+    $sql = 'SELECT id_product FROM ' . _DB_PREFIX_ . 'product WHERE active = 1 LIMIT ' . $offset . ', ' . $limit;
+    $products = Db::getInstance()->executeS($sql);
 
-        // Csak aktív termékeket kérünk le
-        $sql = 'SELECT id_product FROM ' . _DB_PREFIX_ . 'product WHERE active = 1 LIMIT ' . $offset . ', ' . $limit;
-        $products = Db::getInstance()->executeS($sql);
-
-        if (empty($products)) {
-            echo json_encode(['finished' => true, 'count' => 0]);
-            return;
-        }
-
-        $processed = 0;
-        foreach ($products as $row) {
-            $product = new Product((int)$row['id_product']);
-            $params = ['product' => $product];
-            $this->processHook($params);
-            
-            $processed++;
-        }
-
-        echo json_encode([
-            'finished' => false,
-            'page' => $page,
-            'processed_count' => $processed,
-            'next_page' => $page + 1
-        ]);
+    if (empty($products)) {
+        echo json_encode(['finished' => true, 'count' => 0]);
+        return;
     }
+
+    $count = 0;
+    foreach ($products as $p) {
+        $product = new Product((int)$p['id_product']);
+        
+        // --- 2. ÁR LEKÉRÉSE (Akciós ár támogatása) ---
+        $price = Product::getPriceStatic(
+            (int)$product->id, 
+            true,  // Bruttó
+            null, 
+            6, 
+            null, 
+            false, 
+            true   // IGEN, az akciós árat vegye!
+        );
+
+        // --- 3. CIKKSZÁM ÉS ÁTVÁLTÁS LOGIKA ---
+        if ($mode === 'SENDER') {
+            // BESZÁLLÍTÓ: A saját cikkszámát küldi
+            if (empty($product->reference)) continue;
+            $refToSend = $product->reference;
+            $priceToSend = $price;
+        } elseif ($mode === 'CHAIN') {
+            // ELECTROB.RO: Kell a beszállítói kód az azonosításhoz, de a sajátját küldi tovább
+            if (empty($product->supplier_reference)) continue;
+            
+            $refToSend = $product->reference; // A magyar oldal ezt várja
+            $priceToSend = $price * 85;       // RON -> HUF váltás
+        } else {
+            continue;
+        }
+
+        // 4. CSOMAG ÖSSZEÁLLÍTÁSA
+        $payload = [
+            'reference' => $refToSend,
+            'price' => $priceToSend,
+            'token' => Configuration::get('PSP_TOKEN')
+        ];
+
+        // 5. KÜLDÉS
+        if ($mode === 'SENDER') {
+            $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
+            foreach ($targets as $url) {
+                if (!empty(trim($url))) $this->sendWebhook(trim($url), $payload);
+            }
+        } elseif ($mode === 'CHAIN') {
+            $nextUrl = Configuration::get('PSP_NEXT_SHOP_URL');
+            if (!empty($nextUrl)) $this->sendWebhook($nextUrl, $payload);
+        }
+
+        $count++;
+    }
+
+    echo json_encode(['finished' => false, 'count' => $count]);
+}
 
     /**
      * HOOK: Termék Frissítése (CSAK A BESZÁLLÍTÓNÁL FUT)
