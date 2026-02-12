@@ -254,14 +254,24 @@ class PriceSyncPro extends Module
     // 5. ADATOK ELŐKÉSZÍTÉSE - Speciális akciós ár lekérése
     $id_product = (int)$product->id;
     $priceToSend = Product::getPriceStatic(
-        $id_product, 
-        true,   // Bruttó ár lekérése
-        null,   // Alapértelmezett kombináció
-        6,      // Tizedesjegyek száma
-        null, 
-        false,  // Csak a kedvezmény értékét ne (az új árat kérjük)
-        true    // IGEN: Alkalmazza a leárazást (with_reduc)
-    );
+        (int)$product->id, 
+    true,   // Bruttó
+    null, 
+    6, 
+    null, 
+    false, 
+    true,   // Akcióval
+    1,      // Mennyiség
+    false, 
+    null,   // Nincs csoport megkötés
+    null,   // Nincs kategória megkötés
+    null, 
+    $specific_prices, 
+    true,   // Adóval
+    true,   // Akcióval!
+    Context::getContext()->cart, 
+    true
+);
 
     $token = Configuration::get('PSP_TOKEN');
 
