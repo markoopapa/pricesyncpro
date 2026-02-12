@@ -219,13 +219,12 @@ class PriceSyncPro extends Module
 
     protected function processHook($params)
 {
-    // HIBAKERESŐ MÓD
     try {
         static $is_processing = false;
         if ($is_processing) return;
         $is_processing = true;
 
-        // 1. TERMÉK AZONOSÍTÁSA
+        // 1. TERMÉK ID MEGSZERZÉSE
         $id_product = 0;
         if (isset($params['id_product'])) {
             $id_product = (int)$params['id_product'];
@@ -240,64 +239,46 @@ class PriceSyncPro extends Module
         $mode = Configuration::get('PSP_MODE');
         if ($mode === 'OFF' || $mode === 'RECEIVER') return;
 
-        // 2. TERMÉK BETÖLTÉSE
+        // 2. TERMÉK ADATAINAK BETÖLTÉSE
         $product = new Product($id_product);
 
-        self::log($product->reference, "HOOK FUTÁS: Termék mentése érzékelve ($mode)", 'info');
-
-        // --- 3. KAPUŐR (ITT VOLT A HIBA!) ---
-        
+        // 3. KAPUŐR (A Te logikád alapján)
         if ($mode === 'SENDER') {
-            // HA BESZÁLLÍTÓ VAGYUNK: A saját cikkszám (Reference) a fontos!
+            // BESZÁLLÍTÓ OLDALÁN: Csak a Reference (Cikkszám) a lényeg!
             if (empty($product->reference)) {
-                self::log($product->id, "STOP: A terméknek nincs Cikkszáma (Reference)!", 'warning');
+                self::log($product->id, "STOP: Nincs Cikkszám (Reference)!", 'warning');
                 return;
             }
+            $refToSend = $product->reference;
         } else {
-            // HA LÁNC (Electrob.ro) VAGYUNK: Kell a Beszállítói Cikkszám a továbbításhoz
+            // ELECTROB.RO (CHAIN) OLDALÁN: A Beszállító Cikkszáma (Supplier Reference) a lényeg!
             if (empty($product->supplier_reference)) {
-                self::log($product->reference, "STOP: Nincs beszállítói cikkszám.", 'warning');
+                self::log($product->reference, "STOP: Nincs Beszállítói cikkszám (supplier_reference)!", 'warning');
                 return; 
             }
+            // Itt a supplier_reference alapján azonosítunk vissza a láncban
+            $refToSend = $product->supplier_reference;
         }
-        // ------------------------------------
 
-        // 4. ÁR LEKÉRÉSE (Akciós is)
+        // 4. ÁR LEKÉRÉSE (Normál vagy Akciós automatikusan)
         $price = $product->price; 
         try {
-            $price = Product::getPriceStatic(
-                (int)$product->id, 
-                true, null, 6, null, false, true 
-            );
+            $price = Product::getPriceStatic((int)$product->id, true, null, 6, null, false, true);
         } catch (Exception $e) {
-            self::log($product->reference, "ÁR HIBA: " . $e->getMessage(), 'error');
             $price = $product->price; 
         }
 
-        // 5. ÁTVÁLTÁS (Csak electrob.ro / CHAIN módban)
-        $exchangeRate = 85; 
-
+        // 5. ÁTVÁLTÁS ÉS PAYLOAD
+        $priceToSend = $price;
         if ($mode === 'CHAIN') {
-            $priceToSend = $price * $exchangeRate;
-            self::log($product->reference, "ÁTVÁLTÁS: $price RON * $exchangeRate = $priceToSend HUF", 'info');
-        } else {
-            // SENDER (Beszállító): Küldjük az eredetit
-            $priceToSend = $price;
-        }
-
-        $token = Configuration::get('PSP_TOKEN');
-        
-        // CIKKSZÁM KIVÁLASZTÁSA KÜLDÉSHEZ
-        $refToSend = $product->reference;
-        // Ha nincs saját cikkszám (ritka), próbáljuk a másikat
-        if (empty($refToSend)) {
-             $refToSend = $product->supplier_reference;
+            $priceToSend = $price * 85; // RON -> HUF váltás az electrob.ro-n
+            self::log($refToSend, "ÁTVÁLTÁS: $price RON * 85 = $priceToSend HUF", 'info');
         }
 
         $payload = [
             'reference' => $refToSend,
             'price' => $priceToSend,
-            'token' => $token
+            'token' => Configuration::get('PSP_TOKEN')
         ];
 
         // 6. KÜLDÉS
@@ -308,16 +289,13 @@ class PriceSyncPro extends Module
             foreach ($targets as $url) {
                 if (!empty(trim($url))) $this->sendWebhook(trim($url), $payload);
             }
-        } 
-        elseif ($mode === 'CHAIN') {
+        } elseif ($mode === 'CHAIN') {
             $nextUrl = Configuration::get('PSP_NEXT_SHOP_URL');
-            if (!empty($nextUrl)) {
-                $this->sendWebhook($nextUrl, $payload);
-            }
+            if (!empty($nextUrl)) $this->sendWebhook($nextUrl, $payload);
         }
 
-    } catch (Exception $mainError) {
-        self::log('SYSTEM', "KRITIKUS HIBA: " . $mainError->getMessage(), 'error');
+    } catch (Exception $e) {
+        self::log('SYSTEM', "HIBA: " . $e->getMessage(), 'error');
     }
 }
     public function sendWebhook($url, $data)
