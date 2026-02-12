@@ -223,7 +223,7 @@ class PriceSyncPro extends Module
     if ($is_processing) return;
     $is_processing = true;
 
-    // 1. ID MEGSZERZÉSE
+    // 1. TERMÉK AZONOSÍTÁSA (Biztonságos módon)
     $id_product = 0;
     if (isset($params['id_product'])) {
         $id_product = (int)$params['id_product'];
@@ -232,54 +232,52 @@ class PriceSyncPro extends Module
     }
 
     if (!$id_product) return;
-
     if (isset(self::$already_sent[$id_product])) return;
     self::$already_sent[$id_product] = true;
 
     $mode = Configuration::get('PSP_MODE');
     if ($mode === 'OFF' || $mode === 'RECEIVER') return;
 
-    // 2. TERMÉK ÚJRATÖLTÉSE (Hogy biztosan meglegyenek az adatok)
+    // 2. TERMÉK BETÖLTÉSE
     $product = new Product($id_product);
 
-    // 3. KAPUŐR: Beszállítói cikkszám ellenőrzése
+    // 3. KAPUŐR (Beszállítói kód ellenőrzése)
     if (empty($product->supplier_reference)) {
         return; 
     }
 
-    // 4. ALAP ÁR LEKÉRÉSE (RON-ban)
-    $specific_price_output = null; 
-
-    // Ez hozza az akciós árat (pl. 54 RON)
+    // --- 4. AZ EGYSZERŰ ÁRLEKÉRÉS (A "RÉGI" LOGIKA) ---
+    // A 7. paraméter (true) azt mondja: "Ha van akció, vond le! Ha nincs, hagyd az eredetit!"
+    // Nincs $specific_price_output, nincs hiba.
+    
     $priceRON = Product::getPriceStatic(
-        $id_product, true, null, 6, null, false, true, 1, false, null, null, null, $specific_price_output, true, true, null, true
+        (int)$product->id, 
+        true, // Adóval (Bruttó)
+        null, 
+        6,    // Tizedesjegyek
+        null, 
+        false, 
+        true  // USE_REDUC: IGEN! Ha van akció, akkor az akciós árat adja. Ha nincs, a normált.
     );
 
-    // --- 5. A NAGY VÁLTOZTATÁS: RON -> HUF ÁTVÁLTÁS ---
-    
-    // Itt állítsd be a váltószámot! (pl. 85)
+    // --- 5. ÁTVÁLTÁS (85-ös szorzó) ---
     $exchangeRate = 85; 
 
-    // Ha Lánc módban vagyunk, megszorozzuk az árat, mielőtt elküldjük
     if ($mode === 'CHAIN') {
         $priceToSend = $priceRON * $exchangeRate;
-        self::log($product->reference, "ÁTVÁLTÁS: $priceRON RON * $exchangeRate = $priceToSend HUF", 'info');
+        // Logoljuk, hogy lássuk mit számolt
+        self::log($product->reference, "KÜLDÉS: $priceRON RON * $exchangeRate = $priceToSend HUF", 'info');
     } else {
-        // Ha csak sima küldők vagyunk (nem lánc), marad az eredeti ár
         $priceToSend = $priceRON;
     }
 
-    // ---------------------------------------------------
-
+    // --- 6. KÜLDÉS ---
     $token = Configuration::get('PSP_TOKEN');
     
-    // Azonosítás: Azt küldjük, ami a Reference mezőben van
-    // Ha az electrob.ro-n ez "03674", akkor azt küldjük.
-    // Az elektrob.hu api.php-ja meg fogja találni a supplier_reference alapján a 67403-at.
-    $refToSend = $product->reference; 
-    
+    // A Cikkszámot (Reference) küldjük (pl. 67403)
+    $refToSend = $product->reference;
     if (empty($refToSend)) {
-         $refToSend = $product->supplier_reference; // Ha üres a ref, küldjük a beszállítóit végszükség esetén
+         $refToSend = $product->supplier_reference;
     }
 
     $payload = [
@@ -287,8 +285,6 @@ class PriceSyncPro extends Module
         'price' => $priceToSend,
         'token' => $token
     ];
-
-    // --- 6. KÜLDÉS ---
 
     if ($mode === 'SENDER') {
         $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
@@ -300,8 +296,6 @@ class PriceSyncPro extends Module
         $nextUrl = Configuration::get('PSP_NEXT_SHOP_URL');
         if (!empty($nextUrl)) {
             $this->sendWebhook($nextUrl, $payload);
-        } else {
-            self::log($refToSend, "CHAIN HIBA: Üres URL", 'error');
         }
     }
 }
