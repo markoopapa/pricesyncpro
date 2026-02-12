@@ -223,7 +223,7 @@ class PriceSyncPro extends Module
     if ($is_processing) return;
     $is_processing = true;
 
-    // 1. TERMÉK AZONOSÍTÁSA (Biztonságos módon)
+    // 1. TERMÉK AZONOSÍTÁSA
     $id_product = 0;
     if (isset($params['id_product'])) {
         $id_product = (int)$params['id_product'];
@@ -232,6 +232,8 @@ class PriceSyncPro extends Module
     }
 
     if (!$id_product) return;
+    
+    // Végtelen ciklus elleni védelem
     if (isset(self::$already_sent[$id_product])) return;
     self::$already_sent[$id_product] = true;
 
@@ -241,40 +243,41 @@ class PriceSyncPro extends Module
     // 2. TERMÉK BETÖLTÉSE
     $product = new Product($id_product);
 
-    // 3. KAPUŐR (Beszállítói kód ellenőrzése)
+    // 3. KAPUŐR: Beszállítói cikkszám ellenőrzése
     if (empty($product->supplier_reference)) {
         return; 
     }
 
-    // --- 4. AZ EGYSZERŰ ÁRLEKÉRÉS (A "RÉGI" LOGIKA) ---
-    // A 7. paraméter (true) azt mondja: "Ha van akció, vond le! Ha nincs, hagyd az eredetit!"
-    // Nincs $specific_price_output, nincs hiba.
+    // --- 4. ÁR LEKÉRÉSE (A BIZTONSÁGOS MÓDSZER) ---
+    // Ez a függvény automatikusan tudja:
+    // Ha van akció: visszaadja a csökkentett árat.
+    // Ha nincs akció: visszaadja a normál árat.
     
-    $priceRON = Product::getPriceStatic(
+    $price = Product::getPriceStatic(
         (int)$product->id, 
-        true, // Adóval (Bruttó)
+        true,  // Bruttó (Adóval növelt ár)
         null, 
-        6,    // Tizedesjegyek
+        6,     // Tizedesjegyek
         null, 
         false, 
-        true  // USE_REDUC: IGEN! Ha van akció, akkor az akciós árat adja. Ha nincs, a normált.
+        true   // IGEN (use_reduc): Vonja le a kedvezményt, ha van!
     );
 
-    // --- 5. ÁTVÁLTÁS (85-ös szorzó) ---
+    // --- 5. ÁTVÁLTÁS (Csak az electrob.ro használja) ---
     $exchangeRate = 85; 
 
     if ($mode === 'CHAIN') {
-        $priceToSend = $priceRON * $exchangeRate;
-        // Logoljuk, hogy lássuk mit számolt
-        self::log($product->reference, "KÜLDÉS: $priceRON RON * $exchangeRate = $priceToSend HUF", 'info');
+        // Ha electrob.ro (LÁNC): Szorzunk 85-tel
+        $priceToSend = $price * $exchangeRate;
+        self::log($product->reference, "ÁTVÁLTÁS: $price RON * $exchangeRate = $priceToSend HUF", 'info');
     } else {
-        $priceToSend = $priceRON;
+        // Ha Beszállító (SENDER): Küldjük az eredetit
+        $priceToSend = $price;
     }
 
-    // --- 6. KÜLDÉS ---
     $token = Configuration::get('PSP_TOKEN');
     
-    // A Cikkszámot (Reference) küldjük (pl. 67403)
+    // Cikkszám kiválasztása
     $refToSend = $product->reference;
     if (empty($refToSend)) {
          $refToSend = $product->supplier_reference;
@@ -285,6 +288,10 @@ class PriceSyncPro extends Module
         'price' => $priceToSend,
         'token' => $token
     ];
+
+    // --- 6. KÜLDÉS ---
+    // Logoljuk, hogy biztosan lássuk, elindul-e
+    self::log($refToSend, "KÜLDÉS INDÍTÁSA... Ár: $priceToSend", 'info');
 
     if ($mode === 'SENDER') {
         $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
