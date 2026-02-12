@@ -1,9 +1,4 @@
 <?php
-/**
- * Price Sync Pro API Endpoint
- * Fogadja az adatokat és frissíti az árat
- */
-
 declare(strict_types=1);
 
 class PriceSyncProApiModuleFrontController extends ModuleFrontController
@@ -14,102 +9,98 @@ class PriceSyncProApiModuleFrontController extends ModuleFrontController
     public function initContent()
     {
         parent::initContent();
-        $this->ajaxDie($this->processSync());
+        header('Content-Type: application/json');
+
+        try {
+            require_once _PS_MODULE_DIR_ . 'pricesyncpro/pricesyncpro.php';
+            
+            $json = Tools::file_get_contents('php://input');
+            $data = json_decode($json, true);
+
+            if (!$data || !isset($data['reference'])) {
+                die(json_encode(['error' => 'No data received']));
+            }
+
+            // Token ellenőrzés
+            if (!isset($data['token']) || $data['token'] !== Configuration::get('PSP_TOKEN')) {
+                PriceSyncPro::log($data['reference'], "API: Hibás Token!", 'error');
+                die(json_encode(['error' => 'Invalid Token']));
+            }
+
+            $res = $this->processSync($data);
+            die(json_encode($res));
+
+        } catch (Exception $e) {
+            // MOST MÁR A HELYI NAPLÓBA IS BEÍRJUK A HIBÁT, HA ÖSSZEOMLIK
+            $ref = isset($data['reference']) ? $data['reference'] : 'UNKNOWN';
+            PriceSyncPro::log($ref, "KRITIKUS HIBA: " . $e->getMessage(), 'error');
+            
+            die(json_encode([
+                'error' => 'Internal Server Error',
+                'message' => $e->getMessage()
+            ]));
+        }
     }
 
-    protected function processSync()
+    protected function processSync($data)
     {
-        // 1. JSON Adat fogadása
-        $json = Tools::file_get_contents('php://input');
-        $data = json_decode($json, true);
-
-        if (!$data || !isset($data['token']) || !isset($data['reference'])) {
-            return json_encode(['error' => 'Invalid Data']);
+        $ref = $data['reference'];
+        $incomingGross = (float)$data['price'];
+		
+		if ($this->isBlacklisted($ref)) {
+            // Ha tiltólistás, beírjuk a naplóba és nem csinálunk semmit
+            PriceSyncPro::log($ref, "INFO: Tiltólistán van. Beszállítói frissítés blokkolva.", 'warning');
+            return ['status' => 'skipped', 'reason' => 'Blacklisted'];
         }
 
-        // 2. Token Ellenőrzés
-        if ($data['token'] !== Configuration::get('PSP_TOKEN')) {
-            http_response_code(403);
-            return json_encode(['error' => 'Invalid Token']);
-        }
-
-        // 3. Blacklist Ellenőrzés
-        if ($this->isBlacklisted($data['reference'])) {
-            return json_encode(['status' => 'skipped', 'reason' => 'Blacklisted']);
-        }
-
-        // 4. Termék Keresése
-        $matchBy = Configuration::get('PSP_MATCH_BY', 'reference');
-        $id_product = $this->findProduct($data['reference'], $matchBy);
-
+        $id_product = (int)Db::getInstance()->getValue('SELECT id_product FROM ' . _DB_PREFIX_ . 'product WHERE reference = "' . pSQL($ref) . '"');
+        
         if (!$id_product) {
-            return json_encode(['status' => 'skipped', 'reason' => 'Product not found']);
+            return ['error' => 'Product not found'];
         }
 
-        // 5. ÁRKÉPZÉS ÉS KEREKÍTÉS
-        $updated = $this->updatePrice($id_product, (float)$data['price']);
-
-        return json_encode(['status' => 'success', 'id_product' => $id_product, 'updated' => $updated]);
-    }
-
-    /**
-     * Itt történik a matematika
-     */
-    protected function updatePrice(int $id_product, float $sourcePriceGross): bool
-    {
         $product = new Product($id_product);
-        
-        // Szorzó alkalmazása (pl. x1.5 vagy x85)
-        $multiplier = (float)Configuration::get('PSP_MULTIPLIER');
-        $newPriceGross = $sourcePriceGross * $multiplier;
+        $multiplier = (float)Configuration::get('PSP_MULTIPLIER', 1);
+        $targetGross = $incomingGross * $multiplier;
 
-        // Kerekítési logika
-        $currencyId = (int)Configuration::get('PS_CURRENCY_DEFAULT');
-        $currency = new Currency($currencyId);
-        
+        // Kerekítés a bolt pénzneme szerint
+        $currency = Context::getContext()->currency;
         if ($currency->iso_code === 'HUF') {
-            // SPECIÁLIS MAGYAR KEREKÍTÉS: 0 vagy 5 a vége
-            // Képlet: round(x / 5) * 5
-            $newPriceGross = round($newPriceGross / 5) * 5;
+            $targetGross = round($targetGross / 5) * 5;
         } else {
-            // Egyéb valuta (pl. RON, EUR) -> 2 tizedesjegy
-            $newPriceGross = round($newPriceGross, 2);
+            $targetGross = round($targetGross, 2);
         }
 
-        // Biztonsági védelem: Ne legyen 0 az ár
-        if ($newPriceGross <= 0) return false;
+        // --- PONTOS NETTÓSÍTÁS PRESTASHOP SZABVÁNY SZERINT ---
+        $taxRate = (float)$product->getTaxesRate();
+        $newNettoPrice = $targetGross / (1 + ($taxRate / 100));
+        
+        // A PrestaShop 6 tizedesjegyet vár a nettó árnál
+        $newNettoPrice = (float)Tools::ps_round($newNettoPrice, 6);
 
-        // NETTÓSÍTÁS (Visszaszámolás ÁFÁ-ból)
-        // A PS nettó árat tárol, nekünk bruttónk van.
-        $taxRate = $product->getTaxesRate(); // Pl. 27
-        $newPriceNetto = $newPriceGross / (1 + ($taxRate / 100));
-
-        // Frissítés, csak ha változott (hogy ne fussanak felesleges hookok)
-        // Figyelem: A float összehasonlításnál kell egy kis delta
-        if (abs($product->price - $newPriceNetto) > 0.00001) {
-            $product->price = $newPriceNetto;
-            return $product->update();
+        // Csak akkor frissítünk, ha legalább 0.01 eltérés van
+        if (abs((float)$product->price - $newNettoPrice) > 0.01) {
+            $product->price = $newNettoPrice;
+            
+            // Hibakezelés a mentésnél
+            if (!$product->update()) {
+                PriceSyncPro::log($ref, "HIBA: A termék mentése sikertelen.", 'error');
+                return ['error' => 'Save failed'];
+            }
+            
+            PriceSyncPro::log($ref, "SIKER: Ár frissítve. Bruttó: $targetGross", 'success');
+            return ['status' => 'success'];
         }
 
-        return true; // Nem változott, de sikeresnek tekintjük
+        return ['status' => 'no_change'];
     }
-
-    protected function findProduct($ref, $matchBy): int
+	
+	protected function isBlacklisted($ref)
     {
-        if ($matchBy === 'supplier_reference') {
-            // Keresés beszállítói cikkszám alapján
-            $sql = 'SELECT id_product FROM ' . _DB_PREFIX_ . 'product_supplier WHERE product_supplier_reference = "' . pSQL($ref) . '"';
-            return (int)Db::getInstance()->getValue($sql);
-        } else {
-            // Keresés sima cikkszám alapján
-            return (int)Product::getIdByReference($ref);
-        }
-    }
-
-    protected function isBlacklisted($ref): bool
-    {
-        $table = 'pricesyncpro_blacklist';
-        $sql = 'SELECT id_blacklist FROM ' . _DB_PREFIX_ . $table . ' WHERE reference = "' . pSQL($ref) . '"';
+        // Lekérdezzük, hogy a cikkszám szerepel-e a tiltólista táblában
+        $sql = "SELECT id_blacklist FROM `" . _DB_PREFIX_ . "pricesyncpro_blacklist` 
+                WHERE reference = '" . pSQL($ref) . "'";
+        
         return (bool)Db::getInstance()->getValue($sql);
     }
 }
