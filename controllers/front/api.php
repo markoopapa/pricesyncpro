@@ -31,7 +31,6 @@ class PriceSyncProApiModuleFrontController extends ModuleFrontController
             die(json_encode($res));
 
         } catch (Exception $e) {
-            // MOST MÁR A HELYI NAPLÓBA IS BEÍRJUK A HIBÁT, HA ÖSSZEOMLIK
             $ref = isset($data['reference']) ? $data['reference'] : 'UNKNOWN';
             PriceSyncPro::log($ref, "KRITIKUS HIBA: " . $e->getMessage(), 'error');
             
@@ -47,38 +46,27 @@ class PriceSyncProApiModuleFrontController extends ModuleFrontController
         $ref = $data['reference']; 
         $incomingGross = (float)$data['price'];
         
-        // --- INTELLIGENS ÉS BIZTONSÁGOS KERESÉS ---
-        $mode = Configuration::get('PSP_MODE');
-
-        if ($mode === 'CHAIN') {
-            // ELECTROB.RO (Román oldal):
-            // Itt a Beszállító küld adatot. SZIGORÚAN csak a supplier_reference-t nézzük!
-            // Így ha a beszállító cikkszáma véletlenül egyezik egy másik termékedével, nem lesz hiba.
-            $sql = 'SELECT id_product, reference FROM ' . _DB_PREFIX_ . 'product 
-                    WHERE supplier_reference = "' . pSQL($ref) . '"';
-        } elseif ($mode === 'RECEIVER') {
-            // ELEKTROB.HU (Magyar oldal):
-            // Itt az Electrob.ro küld, aki már a pontos saját cikkszámot (Reference) adja meg.
-            $sql = 'SELECT id_product, reference FROM ' . _DB_PREFIX_ . 'product 
-                    WHERE reference = "' . pSQL($ref) . '"';
-        } else {
-            // BIZTONSÁGI TARTALÉK:
-            $sql = 'SELECT id_product, reference FROM ' . _DB_PREFIX_ . 'product 
-                    WHERE reference = "' . pSQL($ref) . '" 
-                    OR supplier_reference = "' . pSQL($ref) . '"';
-        }
+        // --- 1. JAVÍTÁS: MINDIG CSAK A SIMA CIKKSZÁMOT KERESSÜK! ---
+        // Nincs több supplier_reference és bonyolult Mód-vizsgálat.
+        // Bárki is küldi (Beszállító vagy Electrob.ro), a saját "Reference" mezőnkben keressük a párt.
+        $sql = 'SELECT id_product, reference FROM ' . _DB_PREFIX_ . 'product 
+                WHERE reference = "' . pSQL($ref) . '"';
 
         $row = Db::getInstance()->getRow($sql);
         
+        // --- 2. JAVÍTÁS: KECSES KIHAGYÁS HIBA HELYETT ---
         if (!$row) {
-            PriceSyncPro::log($ref, "API HIBA: Termék nem található ($mode módban)!", 'error');
-            return ['error' => 'Product not found'];
+            // Nem dobunk 'error'-t, így nem fagy le a küldő oldalon a Progress Bar!
+            // Ha akarod, hogy a logba bekerüljön, kiveheted a // jelet a következő sor elől:
+            // PriceSyncPro::log($ref, "INFO: Termék nem található, békésen kihagyva.", 'warning');
+            
+            return ['status' => 'skipped', 'message' => 'Product not found'];
         }
 
         $id_product = (int)$row['id_product'];
         $internalRef = $row['reference'];
 
-        // TILTÓLISTA
+        // TILTÓLISTA (Ezt megtartjuk, nagyon hasznos!)
         if ($this->isBlacklisted($internalRef)) {
             PriceSyncPro::log($internalRef, "INFO: Tiltólistán van.", 'warning');
             return ['status' => 'skipped'];
@@ -111,8 +99,8 @@ class PriceSyncProApiModuleFrontController extends ModuleFrontController
         }
         return ['status' => 'no_change'];
     }
-	
-	protected function isBlacklisted($ref)
+    
+    protected function isBlacklisted($ref)
     {
         // Lekérdezzük, hogy a cikkszám szerepel-e a tiltólista táblában
         $sql = "SELECT id_blacklist FROM `" . _DB_PREFIX_ . "pricesyncpro_blacklist` 
