@@ -83,7 +83,7 @@ class PriceSyncPro extends Module
     public function getContent(): string
     {
         // AJAX Bulk Sync kezelés (Maradhat a régi, vagy amit az előbb küldtem)
-        if (Tools::isSubmit('ajax_bulk_sync')) { $this->(); exit; }
+        if (Tools::isSubmit('ajax_bulk_sync')) { $this->processBulkSyncBatch(); exit; }
 
         $output = '';
 
@@ -152,154 +152,107 @@ class PriceSyncPro extends Module
         }
     }
 
-    protected function processBulkSyncBatch()
+    // --- 1. A WEBHOOK KÜLDŐ FÜGGVÉNY (Bekábelezve logolással) ---
+protected function sendWebhook($url, $payload)
 {
-    $limit = 20;
-    $offset = (int)Tools::getValue('offset', 0);
-    $mode = Configuration::get('PSP_MODE');
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Content-Type: application/json',
+        'Accept: application/json'
+    ]);
+    // 5 másodperc timeout, hogy egy lassú weboldal ne fagyassza le az egészet
+    curl_setopt($ch, CURLOPT_TIMEOUT, 5); 
 
-    $multiplier = (float)Configuration::get('PSP_CHAIN_MULTIPLIER');
-    if ($multiplier <= 0) {
-        $multiplier = 85;
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+    // LOGOLJUK A HIBÁT VAGY A SIKERT AZ ERROR_LOG-BA!
+    if ($response === false) {
+        error_log("❌ WEBHOOK CURL ERROR: " . curl_error($ch) . " | URL: " . $url);
+    } else {
+        // Levágjuk a választ, ha túl hosszú, hogy ne szemetelje tele a logot
+        $shortResponse = substr(strip_tags($response), 0, 150);
+        error_log("🌐 WEBHOOK SENT | HTTP: ".$httpCode." | URL: ".$url." | RESPONSE: ".$shortResponse);
     }
 
-    // Aktív termékek lekérése
-    $sql = 'SELECT id_product FROM ' . _DB_PREFIX_ . 'product 
-            WHERE active = 1 
-            ORDER BY id_product ASC 
-            LIMIT ' . (int)$offset . ', ' . (int)$limit;
+    curl_close($ch);
+}
 
+// --- 2. A TELJES SZINKRON FÜGGVÉNY (Durva debuggal és stabil matekkal) ---
+protected function processBulkSyncBatch()
+{
+    @ini_set('max_execution_time', 0);
+    @set_time_limit(0);
+
+    // 1. A JS NYELVÉNEK MEGÉRTÉSE: 'page' változót kapunk!
+    $pageIn = (int)Tools::getValue('page', 1);
+    if ($pageIn < 1) $pageIn = 1;
+
+    // Mehet vissza 20-ra, a hiba nem a szerver gyengesége volt!
+    $limit = 20; 
+    
+    // Matek: 1. oldal = 0 offset, 2. oldal = 20 offset, stb.
+    $offset = ($pageIn - 1) * $limit;
+
+    $mode = Configuration::get('PSP_MODE');
+    $exchangeRate = (float)Configuration::get('PSP_EXCHANGE_RATE');
+    if ($exchangeRate <= 0) $exchangeRate = 85; 
+
+    // 2. LEKÉRDEZÉS
+    $sql = 'SELECT id_product FROM ' . _DB_PREFIX_ . 'product WHERE active = 1 LIMIT ' . (int)$offset . ', ' . (int)$limit;
     $products = Db::getInstance()->executeS($sql);
 
-    $page = floor($offset / $limit) + 1;
+    // Számoljuk meg, hány terméket húztunk le most (Ezt a JS kéri a százalékhoz!)
+    $fetchedCount = is_array($products) ? count($products) : 0;
+    
+    // Ha kevesebb jött meg, mint 20, akkor ez az utolsó oldal
+    $isFinished = ($fetchedCount < $limit);
 
-    // Ha nincs több termék
-    if (empty($products)) {
-        if (ob_get_length()) ob_end_clean();
-        header('Content-Type: application/json');
-
-        echo json_encode([
-            'finished' => true,
-            'offset'   => $offset,
-            'batch'    => $page,
-            'count'    => 0
-        ]);
-        die();
-    }
-
-    $countSent = 0;
-
-    foreach ($products as $p) {
-
-        $product = new Product((int)$p['id_product']);
-
-        if (!Validate::isLoadedObject($product)) {
-            continue;
-        }
-
-        $price = Product::getPriceStatic(
-            (int)$product->id,
-            true,
-            null,
-            6,
-            null,
-            false,
-            true
-        );
-
-        $shouldSend = false;
-        $refToSend = '';
-        $priceToSend = 0;
-
-        if ($mode === 'SENDER') {
-
-            if (!empty($product->reference)) {
-                $refToSend = $product->reference;
-                $priceToSend = $price;
-                $shouldSend = true;
-            }
-
-        } elseif ($mode === 'CHAIN') {
-
-            // Csak akkor küldünk, ha van supplier_reference a fogadó oldalon
-            if (!empty($product->reference)) {
-
-                // Indító bolt reference-et küld
-                $refToSend = $product->reference;
-
-                // Ár szorzás
-                $priceToSend = $price * $multiplier;
-
-                $shouldSend = true;
-            }
-        }
-
-        if ($shouldSend) {
+    // 3. FELDOLGOZÁS (Minden a régi, jó logika)
+    if ($fetchedCount > 0) {
+        foreach ($products as $p) {
+            $product = new Product((int)$p['id_product']);
+            
+            // Csak sima cikkszámot keresünk
+            if (empty($product->reference)) continue;
+            
+            $price = Product::getPriceStatic((int)$product->id, true, null, 6, null, false, true);
+            $refToSend = $product->reference; 
+            
+            $priceToSend = ($mode === 'CHAIN') ? ($price * $exchangeRate) : $price;
 
             $payload = [
                 'reference' => $refToSend,
-                'price'     => $priceToSend,
-                'token'     => Configuration::get('PSP_TOKEN')
+                'price' => $priceToSend,
+                'token' => Configuration::get('PSP_TOKEN')
             ];
 
             if ($mode === 'SENDER') {
-
                 $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
-
                 foreach ($targets as $url) {
-                    $url = trim($url);
-                    if (!empty($url)) {
-                        $this->sendWebhook($url, $payload);
-                    }
+                    if (!empty(trim($url))) $this->sendWebhook(trim($url), $payload);
                 }
-
             } elseif ($mode === 'CHAIN') {
-
-                $nextUrl = trim(Configuration::get('PSP_NEXT_SHOP_URL'));
-
-                if (!empty($nextUrl)) {
-                    $this->sendWebhook($nextUrl, $payload);
-                }
+                $nextUrl = Configuration::get('PSP_NEXT_SHOP_URL');
+                if (!empty($nextUrl)) $this->sendWebhook($nextUrl, $payload);
             }
-
-            $countSent++;
         }
     }
 
-    // Teljes termékszám lekérése a stabil befejezéshez
-    $total = (int)Db::getInstance()->getValue(
-    'SELECT COUNT(*) FROM ' . _DB_PREFIX_ . 'product WHERE active = 1'
-);
-
-$nextOffset = $offset + $limit;
-$isFinished = ($nextOffset >= $total);
-
-// LOOP DETEKTOR
-if ($nextOffset <= $offset) {
-    error_log("⚠ LOOP WARNING: NEXT OFFSET NOT INCREASING!");
-}
-
-error_log(
-    "=== BULK SYNC DEBUG === | " .
-    "OFFSET_IN: ".$offset .
-    " | NEXT_OFFSET: ".$nextOffset .
-    " | TOTAL: ".$total .
-    " | PRODUCTS_FOUND: ".count($products) .
-    " | SENT: ".$countSent .
-    " | FINISHED: ".($isFinished ? 'YES' : 'NO')
-);
-
-if (ob_get_length()) ob_end_clean();
-header('Content-Type: application/json');
-
-echo json_encode([
-    'finished' => $isFinished,
-    'offset'   => $nextOffset,
-    'batch'    => $page,
-    'count'    => $countSent
-]);
-
-die();
+    // --- 4. A TÖKÉLETES VÁLASZ A JAVASCRIPTNEK ---
+    if (ob_get_length()) ob_end_clean();
+    header('Content-Type: application/json');
+    
+    // PONTOSAN AZOKAT A NEVEKET HASZNÁLJUK, AMIKET A JS VÁR!
+    echo json_encode([
+        'finished'        => $isFinished,
+        'processed_count' => $fetchedCount, // Ettől fog mozogni a százalékcsík!
+        'next_page'       => $pageIn + 1    // Ettől fog tovább lépni a következő sorszámra!
+    ]);
+    die();
 }
 
     /**
@@ -405,27 +358,6 @@ die();
 
     } catch (Exception $e) {
         self::log('SYSTEM', "HIBA: " . $e->getMessage(), 'error');
-    }
-}
-    public function sendWebhook($url, $data)
-{
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
-    curl_setopt($ch, CURLOPT_HTTPHEADER, array('Content-Type:application/json'));
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
-    
-    // SSL védelem kikapcsolása - ha ezen múlt, mostantól át fog menni!
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-    
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $curlError = curl_error($ch);
-    curl_close($ch);
-
-    if ($httpCode !== 200) {
-        self::log($data['reference'], "KÜLDÉSI HIBA ($url) -> Kód: $httpCode | Hiba: $curlError", 'error');
     }
 }
 
