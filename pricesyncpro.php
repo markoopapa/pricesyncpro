@@ -222,7 +222,12 @@ protected function processBulkSyncBatch()
             $price = Product::getPriceStatic((int)$product->id, true, null, 6, null, false, true);
             $refToSend = $product->reference; 
             
-            $priceToSend = ($mode === 'CHAIN') ? ($price * $exchangeRate) : $price;
+            if ($mode === 'CHAIN') {
+                $calculatedPrice = $price * $exchangeRate;
+                $priceToSend = round($calculatedPrice / 5) * 5; // Itt is 5-re kerekítjük!
+            } else {
+                $priceToSend = $price;
+            }
 
             $payload = [
                 'reference' => $refToSend,
@@ -284,82 +289,95 @@ protected function processBulkSyncBatch()
     }
 
     protected function processHook($params)
-{
-    try {
-        static $is_processing = false;
-        if ($is_processing) return;
-        $is_processing = true;
-
-        $id_product = 0;
-        if (isset($params['id_product'])) {
-            $id_product = (int)$params['id_product'];
-        } elseif (isset($params['product']->id)) {
-            $id_product = (int)$params['product']->id;
-        }
-
-        if (!$id_product) return;
-        if (isset(self::$already_sent[$id_product])) return;
-        self::$already_sent[$id_product] = true;
-
-        $mode = Configuration::get('PSP_MODE');
-        if ($mode === 'OFF' || $mode === 'RECEIVER') return;
-
-        $product = new Product($id_product);
-
-        // --- KAPUŐR ÉS CIKKSZÁM MEGHATÁROZÁSA ---
-        if ($mode === 'SENDER') {
-            if (empty($product->reference)) return;
-            // A beszállító a saját cikkszámát küldi
-            $refToSend = $product->reference;
-        } else {
-            // ELECTROB.RO (CHAIN):
-            if (empty($product->supplier_reference)) return; 
-            
-            // FONTOS: Az electrob.ro a SAJÁT reference kódját küldje tovább, 
-            // ne a beszállítóét, hogy az elektrob.hu felismerje!
-            $refToSend = $product->reference;
-            
-            // Ha véletlenül üres a saját cikkszám, csak akkor küldjük a beszállítóit
-            if (empty($refToSend)) {
-                $refToSend = $product->supplier_reference;
-            }
-        }
-
-        // ÁR LEKÉRÉSE
-        $price = $product->price; 
+    {
         try {
-            $price = Product::getPriceStatic((int)$product->id, true, null, 6, null, false, true);
-        } catch (Exception $e) {
-            $price = $product->price; 
-        }
-
-        // ÁTVÁLTÁS
-        $priceToSend = $price;
-        if ($mode === 'CHAIN') {
-            $priceToSend = $price * 85;
-            self::log($refToSend, "LÁNC KÜLDÉS: $price RON * 85 = $priceToSend HUF (Ref: $refToSend)", 'info');
-        }
-
-        $payload = [
-            'reference' => $refToSend,
-            'price' => $priceToSend,
-            'token' => Configuration::get('PSP_TOKEN')
-        ];
-
-        if ($mode === 'SENDER') {
-            $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
-            foreach ($targets as $url) {
-                if (!empty(trim($url))) $this->sendWebhook(trim($url), $payload);
+            $id_product = 0;
+            if (isset($params['id_product'])) {
+                $id_product = (int)$params['id_product'];
+            } elseif (isset($params['product']->id)) {
+                $id_product = (int)$params['product']->id;
             }
-        } elseif ($mode === 'CHAIN') {
-            $nextUrl = Configuration::get('PSP_NEXT_SHOP_URL');
-            if (!empty($nextUrl)) $this->sendWebhook($nextUrl, $payload);
-        }
 
-    } catch (Exception $e) {
-        self::log('SYSTEM', "HIBA: " . $e->getMessage(), 'error');
+            if (!$id_product) return;
+
+            // --- 1. JAVÍTÁS: A BERAGADÓ STATIKUS ZÁR ELTÁVOLÍTÁSA ---
+            // A korábbi "static $is_processing" miatt a gyors szerkesztések elakadtak.
+            // Ehelyett az already_sent tömb biztosítja, hogy egy terméket 
+            // egyetlen mentés (vagy folyamat) során csak egyszer küldjünk át.
+            if (isset(self::$already_sent[$id_product])) return;
+            self::$already_sent[$id_product] = true;
+
+            $mode = Configuration::get('PSP_MODE');
+            if ($mode === 'OFF' || $mode === 'RECEIVER') return;
+
+            // --- 2. JAVÍTÁS: PRESTASHOP MEMÓRIA-GYORSÍTÓTÁR KIKERÜLÉSE ---
+            // Töröljük a memóriából a régi árakat és a beragadt termék objektumot is, 
+            // hogy a rendszer garantáltan a frissen beírt értéket vegye ki az adatbázisból!
+            if (method_exists('Product', 'flushPriceCache')) {
+                Product::flushPriceCache();
+            }
+            if (class_exists('ObjectModel') && isset(ObjectModel::$cache_objects['Product_' . $id_product])) {
+                unset(ObjectModel::$cache_objects['Product_' . $id_product]);
+            }
+
+            // Most már tiszta lappal tölthetjük be a terméket
+            $product = new Product($id_product);
+
+            // --- KAPUŐR ÉS CIKKSZÁM MEGHATÁROZÁSA ---
+            if ($mode === 'SENDER') {
+                if (empty($product->reference)) return;
+                $refToSend = $product->reference;
+            } else {
+                if (empty($product->supplier_reference)) return; 
+                $refToSend = $product->reference;
+                if (empty($refToSend)) {
+                    $refToSend = $product->supplier_reference;
+                }
+            }
+
+            // ÁR LEKÉRÉSE A FRISSÍTETT MEMÓRIÁBÓL
+            $price = $product->price; 
+            try {
+                // Ez most már 100%-ban az új, módosított bruttó árat fogja visszaadni!
+                $price = Product::getPriceStatic((int)$product->id, true, null, 6, null, false, true);
+            } catch (Exception $e) {
+                $price = $product->price; 
+            }
+
+            // ÁTVÁLTÁS ÉS LOGOLÁS
+            $priceToSend = $price;
+            if ($mode === 'CHAIN') {
+                $exchangeRate = (float)Configuration::get('PSP_CHAIN_MULTIPLIER');
+                if ($exchangeRate <= 0) $exchangeRate = 85; 
+                
+                $calculatedPrice = $price * $exchangeRate;
+                $priceToSend = round($calculatedPrice / 5) * 5;
+                
+                self::log($refToSend, "LÁNC KÜLDÉS: $price RON * $exchangeRate = $calculatedPrice kerekítve: $priceToSend HUF (Ref: $refToSend)", 'info');
+            } else {
+                self::log($refToSend, "SENDER KÜLDÉS: $priceToSend (Ref: $refToSend)", 'info');
+            }
+
+            $payload = [
+                'reference' => $refToSend,
+                'price' => $priceToSend,
+                'token' => Configuration::get('PSP_TOKEN')
+            ];
+
+            if ($mode === 'SENDER') {
+                $targets = explode("\n", Configuration::get('PSP_TARGET_URLS'));
+                foreach ($targets as $url) {
+                    if (!empty(trim($url))) $this->sendWebhook(trim($url), $payload);
+                }
+            } elseif ($mode === 'CHAIN') {
+                $nextUrl = Configuration::get('PSP_NEXT_SHOP_URL');
+                if (!empty($nextUrl)) $this->sendWebhook($nextUrl, $payload);
+            }
+
+        } catch (Exception $e) {
+            self::log('SYSTEM', "HIBA: " . $e->getMessage(), 'error');
+        }
     }
-}
 
     public function getBlacklist()
 {

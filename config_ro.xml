@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<module>
+    <name>pricesyncpro</name>
+    <displayName><![CDATA[Price Sync Pro]]></displayName>
+    <version><![CDATA[1.1.0]]></version>
+    <description><![CDATA[API-alap&uacute; megold&aacute;s &aacute;r val&oacute;s idejű szinkroniz&aacute;l&aacute;s&aacute;ra]]></description>
+    <author><![CDATA[Markoo]]></author>
+    <tab><![CDATA[administration]]></tab>
+    <is_configurable>1</is_configurable>
+    <need_instance>0</need_instance>
+</module>
